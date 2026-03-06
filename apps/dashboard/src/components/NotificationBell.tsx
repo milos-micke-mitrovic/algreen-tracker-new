@@ -83,9 +83,9 @@ export function NotificationBell() {
 
   const content = (
     <div style={{ width: 360 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <Text strong>{t('notifications.title')}</Text>
-        <Space size={4}>
+      <div style={{ marginBottom: 8 }}>
+        <Text strong style={{ fontSize: 15 }}>{t('notifications.title')}</Text>
+        <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
           {(count ?? 0) > 0 && (
             <Button
               type="link"
@@ -109,7 +109,7 @@ export function NotificationBell() {
               {t('notifications.clearAll')}
             </Button>
           )}
-        </Space>
+        </div>
       </div>
       <List
         loading={isLoading}

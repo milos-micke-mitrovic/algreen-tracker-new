@@ -1,12 +1,13 @@
 import { useState } from 'react';
-import { Upload, Button, List, Space, Typography, message, Popconfirm, Image } from 'antd';
-import { UploadOutlined, DeleteOutlined, FileOutlined, FilePdfOutlined, DownloadOutlined } from '@ant-design/icons';
+import { Upload, Button, List, Space, Typography, Popconfirm, Modal, App } from 'antd';
+import { UploadOutlined, DeleteOutlined, FilePdfOutlined, EyeOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ordersApi } from '@algreen/api-client';
 import { useAuthStore } from '@algreen/auth';
 import type { OrderAttachmentDto } from '@algreen/shared-types';
 import { UserRole } from '@algreen/shared-types';
 import { compressFile } from '../utils/compressImage';
+import { useTranslation } from '@algreen/i18n';
 
 const { Text } = Typography;
 
@@ -29,6 +30,11 @@ export function OrderAttachments({ orderId }: OrderAttachmentsProps) {
   const user = useAuthStore((s) => s.user);
   const queryClient = useQueryClient();
   const [uploading, setUploading] = useState(false);
+  const [pdfPreview, setPdfPreview] = useState<string | null>(null);
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const { message } = App.useApp();
+  const { t } = useTranslation('dashboard');
 
   const canManage =
     user?.role === UserRole.SalesManager ||
@@ -48,12 +54,12 @@ export function OrderAttachments({ orderId }: OrderAttachmentsProps) {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['order-attachments', orderId] });
-      message.success('File uploaded');
+      message.success(t('attachments.uploaded'));
     },
     onError: (err: unknown) => {
       const code = (err as { response?: { data?: { error?: { code?: string; message?: string } } } })
         ?.response?.data?.error;
-      message.error(code?.message || 'Upload failed');
+      message.error(code?.message || t('attachments.uploadFailed'));
     },
   });
 
@@ -62,14 +68,20 @@ export function OrderAttachments({ orderId }: OrderAttachmentsProps) {
       ordersApi.deleteAttachment(orderId, attachmentId, tenantId!),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['order-attachments', orderId] });
-      message.success('Attachment deleted');
+      message.success(t('attachments.deleted'));
     },
     onError: () => {
-      message.error('Delete failed');
+      message.error(t('attachments.deleteFailed'));
     },
   });
 
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
   const handleUpload = async (file: File) => {
+    if (file.size > MAX_FILE_SIZE) {
+      message.error(t('attachments.fileTooLarge'));
+      return;
+    }
     setUploading(true);
     try {
       await uploadMutation.mutateAsync(file);
@@ -81,10 +93,25 @@ export function OrderAttachments({ orderId }: OrderAttachmentsProps) {
   const getDownloadUrl = (attachment: OrderAttachmentDto) =>
     ordersApi.getAttachmentDownloadUrl(orderId, attachment.id);
 
+  const openPdfPreview = async (attachment: OrderAttachmentDto) => {
+    setPdfLoading(true);
+    try {
+      const url = getDownloadUrl(attachment);
+      const resp = await fetch(url);
+      const blob = await resp.blob();
+      const blobUrl = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }));
+      setPdfPreview(blobUrl + '#toolbar=0&navpanes=0');
+    } catch {
+      message.error(t('attachments.previewFailed'));
+    } finally {
+      setPdfLoading(false);
+    }
+  };
+
   return (
     <div style={{ marginTop: 16 }}>
       <Text strong style={{ display: 'block', marginBottom: 8 }}>
-        Attachments ({attachments.length}/10)
+        {t('attachments.title')} ({attachments.length}/10)
       </Text>
 
       {canManage && (
@@ -105,7 +132,7 @@ export function OrderAttachments({ orderId }: OrderAttachmentsProps) {
             size="small"
             style={{ marginBottom: 8 }}
           >
-            Upload File
+            {t('attachments.upload')}
           </Button>
         </Upload>
       )}
@@ -114,27 +141,30 @@ export function OrderAttachments({ orderId }: OrderAttachmentsProps) {
         size="small"
         loading={isLoading}
         dataSource={attachments}
-        locale={{ emptyText: 'No attachments' }}
+        locale={{ emptyText: t('attachments.noAttachments') }}
         renderItem={(item: OrderAttachmentDto) => (
           <List.Item
             style={{ padding: '4px 0' }}
             actions={[
-              <a
-                key="download"
-                href={getDownloadUrl(item)}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <DownloadOutlined />
-              </a>,
+              <Button
+                key="preview"
+                type="text"
+                size="small"
+                icon={<EyeOutlined />}
+                loading={pdfLoading}
+                onClick={() => {
+                  if (isImage(item.contentType)) setImagePreview(getDownloadUrl(item));
+                  else openPdfPreview(item);
+                }}
+              />,
               ...(canManage
                 ? [
                     <Popconfirm
                       key="delete"
-                      title="Delete this attachment?"
+                      title={t('attachments.confirmDelete')}
                       onConfirm={() => deleteMutation.mutate(item.id)}
-                      okText="Yes"
-                      cancelText="No"
+                      okText={t('common:actions.confirm')}
+                      cancelText={t('common:actions.no')}
                     >
                       <Button type="text" size="small" danger icon={<DeleteOutlined />} />
                     </Popconfirm>,
@@ -144,12 +174,13 @@ export function OrderAttachments({ orderId }: OrderAttachmentsProps) {
           >
             <Space size={8}>
               {isImage(item.contentType) ? (
-                <Image
+                <img
                   src={getDownloadUrl(item)}
                   width={40}
                   height={40}
-                  style={{ objectFit: 'cover', borderRadius: 4 }}
-                  preview={{ src: getDownloadUrl(item) }}
+                  style={{ objectFit: 'cover', borderRadius: 4, cursor: 'pointer' }}
+                  onClick={() => setImagePreview(getDownloadUrl(item))}
+                  alt={item.originalFileName}
                 />
               ) : (
                 <FilePdfOutlined style={{ fontSize: 24, color: '#ff4d4f' }} />
@@ -167,6 +198,47 @@ export function OrderAttachments({ orderId }: OrderAttachmentsProps) {
           </List.Item>
         )}
       />
+
+      {/* Image Preview Modal */}
+      <Modal
+        open={!!imagePreview}
+        onCancel={() => setImagePreview(null)}
+        footer={null}
+        width="80vw"
+        style={{ top: 20 }}
+        closeIcon={<span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, borderRadius: '50%', backgroundColor: '#fff', boxShadow: '0 2px 8px rgba(0,0,0,0.15)', fontSize: 14, color: '#000' }}>✕</span>}
+        destroyOnHidden
+      >
+        {imagePreview && (
+          <img
+            src={imagePreview}
+            style={{ width: '100%', maxHeight: '80vh', objectFit: 'contain' }}
+            alt="Preview"
+          />
+        )}
+      </Modal>
+
+      {/* PDF Preview Modal */}
+      <Modal
+        open={!!pdfPreview}
+        onCancel={() => {
+          if (pdfPreview) URL.revokeObjectURL(pdfPreview.split('#')[0]);
+          setPdfPreview(null);
+        }}
+        footer={null}
+        width="80vw"
+        style={{ top: 20 }}
+        closeIcon={<span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, borderRadius: '50%', backgroundColor: '#fff', boxShadow: '0 2px 8px rgba(0,0,0,0.15)', fontSize: 14, color: '#000' }}>✕</span>}
+        destroyOnHidden
+      >
+        {pdfPreview && (
+          <iframe
+            src={pdfPreview}
+            style={{ width: '100%', height: '80vh', border: 'none' }}
+            title="PDF Preview"
+          />
+        )}
+      </Modal>
     </div>
   );
 }

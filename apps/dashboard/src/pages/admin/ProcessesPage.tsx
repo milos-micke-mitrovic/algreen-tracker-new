@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
-  Typography, Table, Button, Drawer, Form, Input, InputNumber, Tag, Space, App,
-  Popconfirm, Divider,
+  Typography, Table, Button, Drawer, Form, Input, InputNumber, Tag, App,
+  Popconfirm, Divider, Select, DatePicker,
 } from 'antd';
 import { PlusOutlined, DeleteOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -9,6 +9,7 @@ import { processesApi } from '@algreen/api-client';
 import { useAuthStore } from '@algreen/auth';
 import type { ProcessDto, SubProcessDto } from '@algreen/shared-types';
 import { useTranslation } from '@algreen/i18n';
+import dayjs from 'dayjs';
 
 const { Title, Text } = Typography;
 
@@ -17,12 +18,21 @@ function getApiErrorCode(error: unknown): string | undefined {
 }
 
 function getTranslatedError(error: unknown, t: (key: string, opts?: Record<string, string>) => string, fallback: string): string {
-  const code = getApiErrorCode(error);
-  if (code) {
-    const translated = t(`common:errors.${code}`, { defaultValue: '' });
+  const resp = (error as { response?: { data?: { error?: { code?: string; message?: string } } } })?.response?.data?.error;
+  if (resp?.code) {
+    const translated = t(`common:errors.${resp.code}`, { defaultValue: '' });
     if (translated) return translated;
   }
-  return fallback;
+  return resp?.message || fallback;
+}
+
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
 }
 
 export function ProcessesPage() {
@@ -30,41 +40,93 @@ export function ProcessesPage() {
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
   const [detailProcess, setDetailProcess] = useState<ProcessDto | null>(null);
-  const [editing, setEditing] = useState(false);
-  const [addingSubProcess, setAddingSubProcess] = useState(false);
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
   const [subProcessForm] = Form.useForm();
   const { message } = App.useApp();
   const { t } = useTranslation('dashboard');
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['processes', tenantId],
-    queryFn: () => processesApi.getAll(tenantId!).then((r) => r.data.items),
+  // ─── Filter & Pagination State ──────────────────────────
+  const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 400);
+  const [isActiveFilter, setIsActiveFilter] = useState<boolean | undefined>(undefined);
+  const [dateFrom, setDateFrom] = useState<dayjs.Dayjs | null>(null);
+  const [dateTo, setDateTo] = useState<dayjs.Dayjs | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+
+  useEffect(() => { setPage(1); }, [debouncedSearch, isActiveFilter, dateFrom, dateTo]);
+
+  // ─── Pending sub-processes for create drawer (controlled state) ────
+  const [pendingSubProcesses, setPendingSubProcesses] = useState<{ key: number; name: string; sequenceOrder: number }[]>([]);
+  const [nextSubKey, setNextSubKey] = useState(0);
+  const [addSubName, setAddSubName] = useState('');
+  const [addSubOrder, setAddSubOrder] = useState<number | undefined>(1);
+
+  const { data: pagedResult, isLoading } = useQuery({
+    queryKey: ['processes', tenantId, debouncedSearch, isActiveFilter, dateFrom?.format('YYYY-MM-DD'), dateTo?.format('YYYY-MM-DD'), page, pageSize],
+    queryFn: () => processesApi.getAll({
+      tenantId: tenantId!,
+      search: debouncedSearch || undefined,
+      isActive: isActiveFilter,
+      createdFrom: dateFrom?.format('YYYY-MM-DD'),
+      createdTo: dateTo?.format('YYYY-MM-DD'),
+      page,
+      pageSize,
+    }).then((r) => r.data),
     enabled: !!tenantId,
   });
 
   // Refresh detail from list data
-  const currentDetail = detailProcess ? data?.find((p) => p.id === detailProcess.id) ?? detailProcess : null;
+  const currentDetail = detailProcess
+    ? pagedResult?.items.find((p) => p.id === detailProcess.id) ?? detailProcess
+    : null;
+
+  useEffect(() => {
+    if (currentDetail) {
+      editForm.setFieldsValue({ name: currentDetail.name, sequenceOrder: currentDetail.sequenceOrder });
+    }
+  }, [currentDetail, editForm]);
 
   const createMutation = useMutation({
     mutationFn: (values: { code: string; name: string; sequenceOrder: number }) =>
-      processesApi.create({ tenantId: tenantId!, ...values }),
-    onSuccess: () => {
+      processesApi.create({
+        tenantId: tenantId!,
+        ...values,
+        subProcesses: pendingSubProcesses.length > 0
+          ? pendingSubProcesses.map(({ name, sequenceOrder }) => ({ name, sequenceOrder }))
+          : undefined,
+      }),
+    onSuccess: (resp) => {
       queryClient.invalidateQueries({ queryKey: ['processes'] });
       setCreateOpen(false);
       createForm.resetFields();
+      setPendingSubProcesses([]);
+      setAddSubName('');
+      setAddSubOrder(1);
       message.success(t('admin.processes.created'));
+      const newProcess = resp.data as ProcessDto;
+      if (newProcess?.id) setDetailProcess(newProcess);
     },
     onError: (err) => message.error(getTranslatedError(err, t, t('admin.processes.createFailed'))),
   });
 
   const updateMutation = useMutation({
     mutationFn: ({ id, values }: { id: string; values: { name: string; sequenceOrder: number } }) =>
-      processesApi.update(id, values),
+      processesApi.update(id, {
+        ...values,
+        addSubProcesses: pendingSubAdds.length > 0
+          ? pendingSubAdds.map(({ name, sequenceOrder }) => ({ name, sequenceOrder }))
+          : undefined,
+        deactivateSubProcessIds: pendingSubRemovals.size > 0
+          ? [...pendingSubRemovals]
+          : undefined,
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['processes'] });
-      setEditing(false);
+      setPendingSubAdds([]);
+      setPendingSubRemovals(new Set());
+      subProcessForm.resetFields();
       message.success(t('admin.processes.updated'));
     },
     onError: (err) => message.error(getTranslatedError(err, t, t('admin.processes.updateFailed'))),
@@ -80,31 +142,34 @@ export function ProcessesPage() {
     onError: (err) => message.error(getTranslatedError(err, t, t('admin.processes.deactivateFailed'))),
   });
 
-  const addSubMutation = useMutation({
-    mutationFn: ({ processId, values }: { processId: string; values: { name: string; sequenceOrder: number } }) =>
-      processesApi.addSubProcess(processId, values),
+  const activateMutation = useMutation({
+    mutationFn: (id: string) => processesApi.activate(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['processes'] });
-      subProcessForm.resetFields();
-      setAddingSubProcess(false);
-      message.success(t('admin.processes.subProcessAdded'));
+      setDetailProcess(null);
+      message.success(t('admin.processes.activated'));
     },
-    onError: (err) => message.error(getTranslatedError(err, t, t('admin.processes.subProcessAddFailed'))),
+    onError: (err) => message.error(getTranslatedError(err, t, t('admin.processes.activateFailed'))),
   });
 
-  const deactivateSubMutation = useMutation({
-    mutationFn: ({ processId, subProcessId }: { processId: string; subProcessId: string }) =>
-      processesApi.deactivateSubProcess(processId, subProcessId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['processes'] });
-      message.success(t('admin.processes.subProcessDeactivated'));
-    },
-  });
+  // ─── Pending sub-process changes for edit drawer ────────
+  const [pendingSubAdds, setPendingSubAdds] = useState<{ key: number; name: string; sequenceOrder: number }[]>([]);
+  const [pendingSubRemovals, setPendingSubRemovals] = useState<Set<string>>(new Set());
+  const [nextEditSubKey, setNextEditSubKey] = useState(0);
 
   const openDetail = (process: ProcessDto) => {
     setDetailProcess(process);
-    setEditing(false);
-    setAddingSubProcess(false);
+    setPendingSubAdds([]);
+    setPendingSubRemovals(new Set());
+    setNextEditSubKey(0);
+  };
+
+  const handleAddPendingSub = () => {
+    if (!addSubName.trim() || !addSubOrder) return;
+    setPendingSubProcesses((prev) => [...prev, { name: addSubName.trim(), sequenceOrder: addSubOrder, key: nextSubKey }]);
+    setNextSubKey((k) => k + 1);
+    setAddSubName('');
+    setAddSubOrder(addSubOrder + 1);
   };
 
   const columns = [
@@ -132,39 +197,84 @@ export function ProcessesPage() {
       render: (subs: SubProcessDto[]) => subs.filter((s) => s.isActive).length,
     },
     {
+      title: t('common:labels.created'),
+      dataIndex: 'createdAt',
+      width: 150,
+      render: (d: string) => d ? dayjs(d).format('DD.MM.YYYY.') : '—',
+      sorter: (a: ProcessDto, b: ProcessDto) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''),
+    },
+    {
       title: t('common:labels.status'),
       dataIndex: 'isActive',
       width: 110,
-      filters: [
-        { text: t('common:status.active'), value: true },
-        { text: t('common:status.inactive'), value: false },
-      ],
-      onFilter: (value: unknown, record: ProcessDto) => record.isActive === value,
       render: (active: boolean) => (
         <Tag color={active ? 'green' : 'default'}>{active ? t('common:status.active') : t('common:status.inactive')}</Tag>
       ),
     },
   ];
 
-  const activeSubs = (currentDetail?.subProcesses ?? [])
-    .filter((s) => s.isActive)
+  const existingSubs = (currentDetail?.subProcesses ?? [])
+    .filter((s) => s.isActive && !pendingSubRemovals.has(s.id))
     .sort((a, b) => a.sequenceOrder - b.sequenceOrder);
+  const activeSubs = existingSubs;
 
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>{t('admin.processes.title')}</Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => { createForm.resetFields(); setPendingSubProcesses([]); setAddSubName(''); setAddSubOrder(1); setCreateOpen(true); }}>
           {t('admin.processes.addProcess')}
         </Button>
       </div>
 
+      <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+        <Input.Search
+          placeholder={t('common:actions.search')}
+          allowClear
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ width: 260 }}
+        />
+        <Select
+          placeholder={t('common:labels.status')}
+          allowClear
+          value={isActiveFilter}
+          onChange={(v) => setIsActiveFilter(v)}
+          style={{ width: 150 }}
+          options={[
+            { label: t('common:status.active'), value: true },
+            { label: t('common:status.inactive'), value: false },
+          ]}
+        />
+        <DatePicker
+          value={dateFrom}
+          onChange={setDateFrom}
+          format="DD.MM.YYYY"
+          allowClear
+          placeholder={t('common:labels.dateFrom')}
+        />
+        <DatePicker
+          value={dateTo}
+          onChange={setDateTo}
+          format="DD.MM.YYYY"
+          allowClear
+          placeholder={t('common:labels.dateTo')}
+        />
+      </div>
+
       <Table
         columns={columns}
-        dataSource={data}
+        dataSource={pagedResult?.items}
         rowKey="id"
         loading={isLoading}
         scroll={{ x: 'max-content' }}
+        pagination={{
+          current: page,
+          pageSize,
+          total: pagedResult?.totalCount,
+          onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+          showSizeChanger: true,
+        }}
         onRow={(record) => ({
           onClick: () => openDetail(record),
           style: { cursor: 'pointer' },
@@ -175,8 +285,8 @@ export function ProcessesPage() {
       <Drawer
         title={t('admin.processes.createProcess')}
         open={createOpen}
-        onClose={() => { createForm.resetFields(); setCreateOpen(false); }}
-        width={400}
+        onClose={() => { createForm.resetFields(); setPendingSubProcesses([]); setAddSubName(''); setAddSubOrder(1); setCreateOpen(false); }}
+        width={Math.min(520, window.innerWidth)}
         extra={
           <Button type="primary" onClick={() => createForm.submit()} loading={createMutation.isPending}>{t('common:actions.save')}</Button>
         }
@@ -189,126 +299,176 @@ export function ProcessesPage() {
             <Input />
           </Form.Item>
           <Form.Item name="sequenceOrder" label={t('admin.processes.sequenceOrder')} rules={[{ required: true }]}>
-            <InputNumber min={1} style={{ width: '100%' }} />
+            <InputNumber min={1} precision={0} style={{ width: '100%' }} />
           </Form.Item>
         </Form>
+
+        <Divider style={{ margin: '12px 0' }} />
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <Title level={5} style={{ margin: 0 }}>
+            {t('admin.processes.subProcesses')} ({pendingSubProcesses.length})
+          </Title>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'flex-start' }}>
+          <Input
+            placeholder={t('common:labels.name')}
+            value={addSubName}
+            onChange={(e) => setAddSubName(e.target.value)}
+            style={{ minWidth: 180 }}
+            onPressEnter={handleAddPendingSub}
+          />
+          <InputNumber
+            min={1}
+            precision={0}
+            placeholder={t('admin.processes.sequenceOrder')}
+            value={addSubOrder}
+            onChange={(v) => setAddSubOrder(v ?? undefined)}
+            style={{ width: 80 }}
+          />
+          <Button
+            type="dashed"
+            icon={<PlusOutlined />}
+            onClick={handleAddPendingSub}
+            disabled={!addSubName.trim() || !addSubOrder}
+          >
+            {t('common:actions.add')}
+          </Button>
+        </div>
+
+        {pendingSubProcesses.length > 0 ? (
+          <Table
+            dataSource={pendingSubProcesses}
+            rowKey="key"
+            size="small"
+            pagination={false}
+            columns={[
+              { title: t('common:labels.name'), dataIndex: 'name' },
+              { title: t('admin.processes.sequenceOrder'), dataIndex: 'sequenceOrder', width: 100 },
+              {
+                title: '',
+                width: 40,
+                render: (_: unknown, record: { key: number }) => (
+                  <Button
+                    type="text"
+                    danger
+                    size="small"
+                    icon={<DeleteOutlined />}
+                    onClick={() => setPendingSubProcesses((prev) => prev.filter((s) => s.key !== record.key))}
+                  />
+                ),
+              },
+            ]}
+          />
+        ) : (
+          <Text type="secondary">{t('admin.processes.noSubProcesses')}</Text>
+        )}
       </Drawer>
 
       {/* Detail / Edit Drawer */}
       <Drawer
         title={currentDetail ? `${currentDetail.code} — ${currentDetail.name}` : ''}
         open={!!detailProcess}
-        onClose={() => { setDetailProcess(null); setEditing(false); setAddingSubProcess(false); editForm.resetFields(); subProcessForm.resetFields(); }}
+        onClose={() => { setDetailProcess(null); setPendingSubAdds([]); setPendingSubRemovals(new Set()); editForm.resetFields(); subProcessForm.resetFields(); }}
         width={Math.min(520, window.innerWidth)}
         extra={
-          editing ? (
-            <Space>
-              <Button onClick={() => {
-                setEditing(false);
-                if (currentDetail) editForm.setFieldsValue({ name: currentDetail.name, sequenceOrder: currentDetail.sequenceOrder });
-              }}>{t('common:actions.cancel')}</Button>
-              <Button type="primary" onClick={() => editForm.submit()} loading={updateMutation.isPending}>{t('common:actions.save')}</Button>
-            </Space>
-          ) : (
-            <Space>
-              <Button onClick={() => {
-                if (currentDetail) editForm.setFieldsValue({ name: currentDetail.name, sequenceOrder: currentDetail.sequenceOrder });
-                setEditing(true);
-              }}>{t('common:actions.edit')}</Button>
-              {currentDetail?.isActive && (
-                <Popconfirm
-                  title={t('admin.processes.deactivateConfirm')}
-                  okText={t('common:actions.confirm')}
-                  cancelText={t('common:actions.no')}
-                  onConfirm={() => deactivateMutation.mutate(currentDetail!.id)}
-                >
-                  <Button danger loading={deactivateMutation.isPending}>{t('admin.processes.deactivate')}</Button>
-                </Popconfirm>
-              )}
-            </Space>
-          )
+          <div style={{ display: 'flex', gap: 8 }}>
+            {currentDetail?.isActive ? (
+              <Popconfirm
+                title={t('admin.processes.deactivateConfirm')}
+                okText={t('common:actions.confirm')}
+                cancelText={t('common:actions.no')}
+                onConfirm={() => deactivateMutation.mutate(currentDetail!.id)}
+              >
+                <Button danger loading={deactivateMutation.isPending}>{t('admin.processes.deactivate')}</Button>
+              </Popconfirm>
+            ) : currentDetail && (
+              <Popconfirm
+                title={t('admin.processes.activateConfirm')}
+                okText={t('common:actions.confirm')}
+                cancelText={t('common:actions.no')}
+                onConfirm={() => activateMutation.mutate(currentDetail.id)}
+              >
+                <Button type="primary" ghost loading={activateMutation.isPending}>{t('admin.processes.activate')}</Button>
+              </Popconfirm>
+            )}
+            <Button type="primary" onClick={() => editForm.submit()} loading={updateMutation.isPending}>{t('common:actions.save')}</Button>
+          </div>
         }
       >
         {currentDetail && (
           <>
-            {/* Edit form / Read-only info */}
-            {editing ? (
-              <Form
-                form={editForm}
-                layout="vertical"
-                onFinish={(v) => updateMutation.mutate({ id: currentDetail.id, values: v })}
-              >
-                <Form.Item name="name" label={t('common:labels.name')} rules={[{ required: true }]}>
-                  <Input />
-                </Form.Item>
-                <Form.Item name="sequenceOrder" label={t('admin.processes.sequenceOrder')} rules={[{ required: true }]}>
-                  <InputNumber min={1} style={{ width: '100%' }} />
-                </Form.Item>
-              </Form>
-            ) : (
-              <div style={{ display: 'flex', gap: 24, marginBottom: 16 }}>
-                <div>
-                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>{t('common:labels.code')}</Text>
-                  <Text strong>{currentDetail.code}</Text>
-                </div>
-                <div>
-                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>{t('admin.processes.sequenceOrder')}</Text>
-                  <Text strong>{currentDetail.sequenceOrder}</Text>
-                </div>
-                <div>
-                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>{t('common:labels.status')}</Text>
-                  <Tag color={currentDetail.isActive ? 'green' : 'default'}>
-                    {currentDetail.isActive ? t('common:status.active') : t('common:status.inactive')}
-                  </Tag>
-                </div>
-              </div>
+            <Form
+              form={editForm}
+              layout="vertical"
+              onFinish={(v) => updateMutation.mutate({ id: currentDetail.id, values: v })}
+            >
+              <Form.Item name="name" label={t('common:labels.name')} rules={[{ required: true }]}>
+                <Input />
+              </Form.Item>
+              <Form.Item name="sequenceOrder" label={t('admin.processes.sequenceOrder')} rules={[{ required: true }]}>
+                <InputNumber min={1} precision={0} style={{ width: '100%' }} />
+              </Form.Item>
+            </Form>
+            {currentDetail.updatedAt && (
+              <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
+                {t('common:labels.updated')}: {dayjs(currentDetail.updatedAt).format('DD.MM.YYYY.')}
+              </Text>
             )}
 
             <Divider style={{ margin: '12px 0' }} />
 
-            {/* Sub-processes */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
               <Title level={5} style={{ margin: 0 }}>
-                {t('admin.processes.subProcesses')} ({activeSubs.length})
+                {t('admin.processes.subProcesses')} ({activeSubs.length + pendingSubAdds.length})
               </Title>
-              {!addingSubProcess && currentDetail.isActive && (
-                <Button size="small" icon={<PlusOutlined />} onClick={() => setAddingSubProcess(true)}>
-                  {t('admin.processes.addSubProcess')}
-                </Button>
-              )}
             </div>
 
-            {addingSubProcess && (
-              <>
+            {currentDetail.isActive && (
+              <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'flex-start' }}>
                 <Form
                   form={subProcessForm}
-                  layout="vertical"
-                  size="middle"
-                  onFinish={(v) => addSubMutation.mutate({ processId: currentDetail.id, values: v })}
+                  layout="inline"
+                  onFinish={(v) => {
+                    setPendingSubAdds((prev) => [...prev, { key: nextEditSubKey, name: v.name, sequenceOrder: v.sequenceOrder }]);
+                    setNextEditSubKey((k) => k + 1);
+                    subProcessForm.resetFields();
+                    subProcessForm.setFieldValue('sequenceOrder', activeSubs.length + pendingSubAdds.length + 2);
+                  }}
                 >
-                  <Form.Item name="name" label={t('common:labels.name')} rules={[{ required: true }]}>
-                    <Input />
+                  <Form.Item name="name" rules={[{ required: true, message: t('common:validation.required') }]} style={{ minWidth: 180 }}>
+                    <Input placeholder={t('common:labels.name')} />
                   </Form.Item>
-                  <Form.Item name="sequenceOrder" label={t('admin.processes.sequenceOrder')} rules={[{ required: true }]}>
-                    <InputNumber min={1} style={{ width: '100%' }} />
+                  <Form.Item name="sequenceOrder" rules={[{ required: true, message: t('common:validation.required') }]} initialValue={activeSubs.length + pendingSubAdds.length + 1}>
+                    <InputNumber min={1} precision={0} placeholder={t('admin.processes.sequenceOrder')} style={{ width: 80 }} />
                   </Form.Item>
-                  <Space style={{ marginBottom: 12 }}>
-                    <Button type="primary" htmlType="submit" loading={addSubMutation.isPending}>{t('common:actions.save')}</Button>
-                    <Button onClick={() => { setAddingSubProcess(false); subProcessForm.resetFields(); }}>{t('common:actions.cancel')}</Button>
-                  </Space>
+                  <Form.Item>
+                    <Button type="dashed" icon={<PlusOutlined />} htmlType="submit">
+                      {t('common:actions.add')}
+                    </Button>
+                  </Form.Item>
                 </Form>
-                <Divider style={{ margin: '8px 0' }} />
-              </>
+              </div>
             )}
 
-            {activeSubs.length > 0 ? (
-              <Table
-                dataSource={activeSubs}
-                rowKey="id"
+            {(activeSubs.length > 0 || pendingSubAdds.length > 0) ? (
+              <Table<{ key: string; name: string; sequenceOrder: number; isNew: boolean; id: string }>
+                dataSource={[
+                  ...activeSubs.map((s) => ({ key: s.id, name: s.name, sequenceOrder: s.sequenceOrder, isNew: false, id: s.id })),
+                  ...pendingSubAdds.map((s) => ({ key: `new-${s.key}`, name: s.name, sequenceOrder: s.sequenceOrder, isNew: true, id: `new-${s.key}` })),
+                ]}
+                rowKey="key"
                 size="small"
                 pagination={false}
                 columns={[
-                  { title: t('common:labels.name'), dataIndex: 'name' },
+                  {
+                    title: t('common:labels.name'),
+                    dataIndex: 'name',
+                    render: (name, record) => (
+                      record.isNew ? <Text type="success">{name}</Text> : name
+                    ),
+                  },
                   {
                     title: t('admin.processes.sequenceOrder'),
                     dataIndex: 'sequenceOrder',
@@ -317,15 +477,27 @@ export function ProcessesPage() {
                   {
                     title: '',
                     width: 40,
-                    render: (_: unknown, sub: SubProcessDto) => (
-                      <Popconfirm
-                        title={t('admin.processes.deactivateSubConfirm')}
-                        okText={t('common:actions.confirm')}
-                        cancelText={t('common:actions.no')}
-                        onConfirm={() => deactivateSubMutation.mutate({ processId: currentDetail.id, subProcessId: sub.id })}
-                      >
-                        <Button type="text" danger size="small" icon={<DeleteOutlined />} />
-                      </Popconfirm>
+                    render: (_, record) => (
+                      record.isNew ? (
+                        <Button
+                          type="text"
+                          danger
+                          size="small"
+                          icon={<DeleteOutlined />}
+                          onClick={() => {
+                            const numKey = Number(record.key.replace('new-', ''));
+                            setPendingSubAdds((prev) => prev.filter((s) => s.key !== numKey));
+                          }}
+                        />
+                      ) : (
+                        <Button
+                          type="text"
+                          danger
+                          size="small"
+                          icon={<DeleteOutlined />}
+                          onClick={() => setPendingSubRemovals((prev) => new Set([...prev, record.id]))}
+                        />
+                      )
                     ),
                   },
                 ]}

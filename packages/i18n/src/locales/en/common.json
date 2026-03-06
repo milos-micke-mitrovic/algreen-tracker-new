@@ -16,7 +16,8 @@
     "filter": "Filter",
     "configure": "Configure",
     "add": "Add",
-    "edit": "Edit"
+    "edit": "Edit",
+    "search": "Search..."
   },
   "labels": {
     "email": "Email",
@@ -28,6 +29,10 @@
     "description": "Description",
     "actions": "Actions",
     "created": "Created",
+    "updated": "Updated",
+    "handledAt": "Handled At",
+    "dateFrom": "From date",
+    "dateTo": "To date",
     "priority": "Priority",
     "notes": "Notes",
     "role": "Role",
@@ -86,6 +91,7 @@
     "ORDER_NOT_DRAFT": "This action is only allowed on draft orders",
     "DUPLICATE_PROCESS": "This process is already added",
     "DUPLICATE_SUBPROCESS": "This sub-process is already added",
+    "DUPLICATE_ORDER": "A sub-process with this sequence order already exists",
     "SUBPROCESSES_NOT_COMPLETE": "All sub-processes must be completed first",
     "REASON_REQUIRED": "Reason is required",
     "NOT_BLOCKED": "This process is not blocked",
@@ -111,7 +117,14 @@
     "ATTACHMENT_NOT_FOUND": "Attachment not found",
     "DUPLICATE_CODE": "Code already exists",
     "CATEGORY_NAME_EXISTS": "A category with this name already exists",
-    "INTERNAL_ERROR": "An unexpected error occurred"
+    "TENANT_CODE_EXISTS": "A tenant with this code already exists",
+    "TENANT_NAME_REQUIRED": "Tenant name is required",
+    "TENANT_CODE_REQUIRED": "Tenant code is required",
+    "TENANT_CODE_TOO_LONG": "Tenant code must be 50 characters or less",
+    "SHIFT_NAME_EXISTS": "A shift with this name already exists",
+    "INTERNAL_ERROR": "An unexpected error occurred",
+    "connectionFailed": "Unable to connect to the server",
+    "connectionFailedDescription": "The server is not responding. Please check your connection or try again later."
   },
   "enums": {
     "OrderStatus": {

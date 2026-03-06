@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
-  Typography, Table, Button, Drawer, Form, Input, InputNumber, Tag, Space, App,
-  Switch, Divider, ColorPicker,
+  Typography, Table, Button, Drawer, Form, Input, InputNumber, Tag, App,
+  Divider, ColorPicker, Popconfirm, Spin, Select, DatePicker,
 } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -10,40 +10,72 @@ import type { TenantDto } from '@algreen/shared-types';
 import { useTranslation } from '@algreen/i18n';
 import dayjs from 'dayjs';
 
-const { Title, Text } = Typography;
+const { Title } = Typography;
+
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
 
 function getApiErrorCode(error: unknown): string | undefined {
   return (error as { response?: { data?: { error?: { code?: string } } } })?.response?.data?.error?.code;
 }
 
 function getTranslatedError(error: unknown, t: (key: string, opts?: Record<string, string>) => string, fallback: string): string {
-  const code = getApiErrorCode(error);
-  if (code) {
-    const translated = t(`common:errors.${code}`, { defaultValue: '' });
+  const resp = (error as { response?: { data?: { error?: { code?: string; message?: string } } } })?.response?.data?.error;
+  if (resp?.code) {
+    const translated = t(`common:errors.${resp.code}`, { defaultValue: '' });
     if (translated) return translated;
   }
+  return resp?.message || fallback;
+}
+
+function resolveColor(value: unknown, fallback: string): string {
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object' && 'toHexString' in value) return (value as { toHexString: () => string }).toHexString();
   return fallback;
 }
 
 export function TenantsPage() {
   const queryClient = useQueryClient();
-  const [createOpen, setCreateOpen] = useState(false);
-  const [detailTenant, setDetailTenant] = useState<TenantDto | null>(null);
-  const [editing, setEditing] = useState(false);
-  const [editingSettings, setEditingSettings] = useState(false);
-  const [createForm] = Form.useForm();
-  const [editForm] = Form.useForm();
-  const [settingsForm] = Form.useForm();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [editTenant, setEditTenant] = useState<TenantDto | null>(null);
+  const [form] = Form.useForm();
   const { message } = App.useApp();
   const { t } = useTranslation('dashboard');
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['tenants'],
-    queryFn: () => tenantsApi.getAll().then((r) => r.data.items),
+  // ─── Filter & Pagination State ──────────────────────────
+  const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 400);
+  const [isActiveFilter, setIsActiveFilter] = useState<boolean | undefined>(undefined);
+  const [dateFrom, setDateFrom] = useState<dayjs.Dayjs | null>(null);
+  const [dateTo, setDateTo] = useState<dayjs.Dayjs | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+
+  useEffect(() => { setPage(1); }, [debouncedSearch, isActiveFilter, dateFrom, dateTo]);
+
+  const isCreating = drawerOpen && !editTenant;
+
+  const { data: pagedResult, isLoading } = useQuery({
+    queryKey: ['tenants', debouncedSearch, isActiveFilter, dateFrom?.format('YYYY-MM-DD'), dateTo?.format('YYYY-MM-DD'), page, pageSize],
+    queryFn: () => tenantsApi.getAll({
+      search: debouncedSearch || undefined,
+      isActive: isActiveFilter,
+      createdFrom: dateFrom?.format('YYYY-MM-DD'),
+      createdTo: dateTo?.format('YYYY-MM-DD'),
+      page,
+      pageSize,
+    }).then((r) => r.data),
   });
 
-  // Refresh detail from list data
-  const currentDetail = detailTenant ? data?.find((item) => item.id === detailTenant.id) ?? detailTenant : null;
+  const data = pagedResult?.items;
+
+  const currentDetail = editTenant ? data?.find((item) => item.id === editTenant.id) ?? editTenant : null;
 
   const { data: settings, isLoading: settingsLoading } = useQuery({
     queryKey: ['tenant-settings', currentDetail?.id],
@@ -51,48 +83,95 @@ export function TenantsPage() {
     enabled: !!currentDetail,
   });
 
+  // Populate form when settings load for edit
+  useEffect(() => {
+    if (settings && editTenant) {
+      form.setFieldsValue({
+        defaultWarningDays: settings.defaultWarningDays,
+        defaultCriticalDays: settings.defaultCriticalDays,
+        warningColor: settings.warningColor,
+        criticalColor: settings.criticalColor,
+      });
+    }
+  }, [settings, editTenant, form]);
+
   const createMutation = useMutation({
-    mutationFn: (values: { name: string; code: string }) => tenantsApi.create(values),
+    mutationFn: (values: Record<string, unknown>) =>
+      tenantsApi.create({
+        name: values.name as string,
+        code: values.code as string,
+        defaultWarningDays: values.defaultWarningDays as number,
+        defaultCriticalDays: values.defaultCriticalDays as number,
+        warningColor: resolveColor(values.warningColor, '#FFA500'),
+        criticalColor: resolveColor(values.criticalColor, '#FF0000'),
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['tenants'] });
-      setCreateOpen(false);
-      createForm.resetFields();
+      closeDrawer();
       message.success(t('admin.tenants.created'));
     },
     onError: (err) => message.error(getTranslatedError(err, t, t('admin.tenants.createFailed'))),
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, values }: { id: string; values: { name: string; isActive: boolean } }) =>
-      tenantsApi.update(id, values),
+    mutationFn: ({ id, values }: { id: string; values: Record<string, unknown> }) =>
+      tenantsApi.update(id, {
+        name: values.name as string,
+        isActive: currentDetail!.isActive,
+        defaultWarningDays: values.defaultWarningDays as number,
+        defaultCriticalDays: values.defaultCriticalDays as number,
+        warningColor: resolveColor(values.warningColor, '#faad14'),
+        criticalColor: resolveColor(values.criticalColor, '#cf1322'),
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['tenants'] });
-      setEditing(false);
+      queryClient.invalidateQueries({ queryKey: ['tenant-settings'] });
       message.success(t('admin.tenants.updated'));
     },
     onError: (err) => message.error(getTranslatedError(err, t, t('admin.tenants.updateFailed'))),
   });
 
-  const updateSettingsMutation = useMutation({
-    mutationFn: ({ id, values }: { id: string; values: Record<string, unknown> }) =>
-      tenantsApi.updateSettings(id, {
-        defaultWarningDays: values.defaultWarningDays as number,
-        defaultCriticalDays: values.defaultCriticalDays as number,
-        warningColor: typeof values.warningColor === 'string' ? values.warningColor : (values.warningColor as { toHexString: () => string })?.toHexString?.() ?? '#faad14',
-        criticalColor: typeof values.criticalColor === 'string' ? values.criticalColor : (values.criticalColor as { toHexString: () => string })?.toHexString?.() ?? '#cf1322',
-      }),
+  const deactivateMutation = useMutation({
+    mutationFn: (tenant: TenantDto) =>
+      tenantsApi.update(tenant.id, { name: tenant.name, isActive: false }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['tenant-settings'] });
-      setEditingSettings(false);
-      message.success(t('admin.tenants.settingsUpdated'));
+      queryClient.invalidateQueries({ queryKey: ['tenants'] });
+      closeDrawer();
+      message.success(t('admin.tenants.deactivated'));
     },
-    onError: (err) => message.error(getTranslatedError(err, t, t('admin.tenants.settingsUpdateFailed'))),
+    onError: (err) => message.error(getTranslatedError(err, t, t('admin.tenants.updateFailed'))),
   });
 
-  const openDetail = (tenant: TenantDto) => {
-    setDetailTenant(tenant);
-    setEditing(false);
-    setEditingSettings(false);
+  const openCreate = () => {
+    form.resetFields();
+    form.setFieldsValue({
+      defaultWarningDays: 7,
+      defaultCriticalDays: 3,
+      warningColor: '#FFA500',
+      criticalColor: '#FF0000',
+    });
+    setEditTenant(null);
+    setDrawerOpen(true);
+  };
+
+  const openEdit = (tenant: TenantDto) => {
+    setEditTenant(tenant);
+    form.setFieldsValue({ name: tenant.name, code: tenant.code });
+    setDrawerOpen(true);
+  };
+
+  const closeDrawer = () => {
+    setDrawerOpen(false);
+    setEditTenant(null);
+    form.resetFields();
+  };
+
+  const handleFinish = (values: Record<string, unknown>) => {
+    if (isCreating) {
+      createMutation.mutate(values);
+    } else {
+      updateMutation.mutate({ id: currentDetail!.id, values });
+    }
   };
 
   const columns = [
@@ -110,11 +189,6 @@ export function TenantsPage() {
       title: t('common:labels.status'),
       dataIndex: 'isActive',
       width: 110,
-      filters: [
-        { text: t('common:status.active'), value: true },
-        { text: t('common:status.inactive'), value: false },
-      ],
-      onFilter: (value: unknown, record: TenantDto) => record.isActive === value,
       render: (active: boolean) => (
         <Tag color={active ? 'green' : 'default'}>{active ? t('common:status.active') : t('common:status.inactive')}</Tag>
       ),
@@ -124,7 +198,7 @@ export function TenantsPage() {
       dataIndex: 'createdAt',
       width: 150,
       sorter: (a: TenantDto, b: TenantDto) => dayjs(a.createdAt).unix() - dayjs(b.createdAt).unix(),
-      render: (d: string) => dayjs(d).format('DD.MM.YYYY. HH:mm'),
+      render: (d: string) => dayjs(d).format('DD.MM.YYYY.'),
     },
   ];
 
@@ -132,9 +206,44 @@ export function TenantsPage() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>{t('admin.tenants.title')}</Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
           {t('admin.tenants.addTenant')}
         </Button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+        <Input.Search
+          placeholder={t('common:actions.search')}
+          allowClear
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ width: 260 }}
+        />
+        <Select
+          placeholder={t('common:labels.status')}
+          allowClear
+          value={isActiveFilter}
+          onChange={(v) => setIsActiveFilter(v)}
+          style={{ width: 150 }}
+          options={[
+            { label: t('common:status.active'), value: true },
+            { label: t('common:status.inactive'), value: false },
+          ]}
+        />
+        <DatePicker
+          value={dateFrom}
+          onChange={setDateFrom}
+          format="DD.MM.YYYY"
+          allowClear
+          placeholder={t('common:labels.dateFrom')}
+        />
+        <DatePicker
+          value={dateTo}
+          onChange={setDateTo}
+          format="DD.MM.YYYY"
+          allowClear
+          placeholder={t('common:labels.dateTo')}
+        />
       </div>
 
       <Table
@@ -143,164 +252,74 @@ export function TenantsPage() {
         rowKey="id"
         loading={isLoading}
         scroll={{ x: 'max-content' }}
+        pagination={{
+          current: page,
+          pageSize,
+          total: pagedResult?.totalCount,
+          onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+          showSizeChanger: true,
+        }}
         onRow={(record) => ({
-          onClick: () => openDetail(record),
+          onClick: () => openEdit(record),
           style: { cursor: 'pointer' },
         })}
       />
 
-      {/* Create Drawer */}
       <Drawer
-        title={t('admin.tenants.createTenant')}
-        open={createOpen}
-        onClose={() => { createForm.resetFields(); setCreateOpen(false); }}
-        width={400}
-        extra={
-          <Button type="primary" onClick={() => createForm.submit()} loading={createMutation.isPending}>{t('common:actions.save')}</Button>
-        }
-      >
-        <Form form={createForm} layout="vertical" onFinish={(v) => createMutation.mutate(v)}>
-          <Form.Item name="name" label={t('common:labels.name')} rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="code" label={t('common:labels.code')} rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-        </Form>
-      </Drawer>
-
-      {/* Detail / Edit Drawer */}
-      <Drawer
-        title={currentDetail ? currentDetail.name : ''}
-        open={!!detailTenant}
-        onClose={() => { setDetailTenant(null); setEditing(false); setEditingSettings(false); editForm.resetFields(); settingsForm.resetFields(); }}
+        title={isCreating ? t('admin.tenants.createTenant') : currentDetail?.name}
+        open={drawerOpen}
+        onClose={closeDrawer}
         width={Math.min(480, window.innerWidth)}
         extra={
-          editing ? (
-            <Space>
-              <Button onClick={() => {
-                setEditing(false);
-                if (currentDetail) editForm.setFieldsValue({ name: currentDetail.name, isActive: currentDetail.isActive });
-              }}>{t('common:actions.cancel')}</Button>
-              <Button type="primary" onClick={() => editForm.submit()} loading={updateMutation.isPending}>{t('common:actions.save')}</Button>
-            </Space>
-          ) : (
-            <Button onClick={() => {
-              if (currentDetail) editForm.setFieldsValue({ name: currentDetail.name, isActive: currentDetail.isActive });
-              setEditing(true);
-            }}>{t('common:actions.edit')}</Button>
-          )
+          <div style={{ display: 'flex', gap: 8 }}>
+            {!isCreating && currentDetail?.isActive && (
+              <Popconfirm
+                title={t('admin.tenants.deactivateConfirm')}
+                onConfirm={() => deactivateMutation.mutate(currentDetail)}
+                okText={t('common:actions.confirm')}
+                cancelText={t('common:actions.cancel')}
+              >
+                <Button danger loading={deactivateMutation.isPending}>{t('admin.tenants.deactivate')}</Button>
+              </Popconfirm>
+            )}
+            <Button
+              type="primary"
+              onClick={() => form.submit()}
+              loading={createMutation.isPending || updateMutation.isPending}
+            >
+              {t('common:actions.save')}
+            </Button>
+          </div>
         }
       >
-        {currentDetail && (
-          <>
-            {editing ? (
-              <Form
-                form={editForm}
-                layout="vertical"
-                onFinish={(v) => updateMutation.mutate({ id: currentDetail.id, values: v })}
-              >
-                <Form.Item name="name" label={t('common:labels.name')} rules={[{ required: true }]}>
-                  <Input />
-                </Form.Item>
-                <Form.Item name="isActive" label={t('common:labels.status')} valuePropName="checked">
-                  <Switch checkedChildren={t('common:status.active')} unCheckedChildren={t('common:status.inactive')} />
-                </Form.Item>
-              </Form>
-            ) : (
-              <div style={{ display: 'flex', gap: 24, marginBottom: 16 }}>
-                <div>
-                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>{t('common:labels.code')}</Text>
-                  <Text strong>{currentDetail.code}</Text>
-                </div>
-                <div>
-                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>{t('common:labels.status')}</Text>
-                  <Tag color={currentDetail.isActive ? 'green' : 'default'}>
-                    {currentDetail.isActive ? t('common:status.active') : t('common:status.inactive')}
-                  </Tag>
-                </div>
-                {currentDetail.createdAt && (
-                  <div>
-                    <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>{t('common:labels.created')}</Text>
-                    <Text>{dayjs(currentDetail.createdAt).format('DD.MM.YYYY. HH:mm')}</Text>
-                  </div>
-                )}
-              </div>
-            )}
-
-            <Divider style={{ margin: '12px 0' }} />
-
-            {/* Settings section */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <Title level={5} style={{ margin: 0 }}>{t('admin.tenants.settings')}</Title>
-              {!editingSettings ? (
-                <Button size="small" onClick={() => {
-                  if (settings) {
-                    settingsForm.setFieldsValue({
-                      defaultWarningDays: settings.defaultWarningDays,
-                      defaultCriticalDays: settings.defaultCriticalDays,
-                      warningColor: settings.warningColor,
-                      criticalColor: settings.criticalColor,
-                    });
-                  }
-                  setEditingSettings(true);
-                }}>{t('common:actions.edit')}</Button>
-              ) : (
-                <Space>
-                  <Button size="small" onClick={() => setEditingSettings(false)}>{t('common:actions.cancel')}</Button>
-                  <Button size="small" type="primary" onClick={() => settingsForm.submit()} loading={updateSettingsMutation.isPending}>{t('common:actions.save')}</Button>
-                </Space>
-              )}
+        {!isCreating && settingsLoading ? (
+          <div style={{ textAlign: 'center', padding: 24 }}><Spin /></div>
+        ) : (
+          <Form form={form} layout="vertical" onFinish={handleFinish}>
+            <Form.Item name="name" label={t('common:labels.name')} rules={[{ required: true }]}>
+              <Input />
+            </Form.Item>
+            <Form.Item name="code" label={t('common:labels.code')} rules={[{ required: true }]}>
+              <Input disabled={!isCreating} />
+            </Form.Item>
+            <Divider />
+            <div style={{ display: 'flex', gap: 12 }}>
+              <Form.Item name="defaultWarningDays" label={t('admin.tenants.defaultWarningDays')} rules={[{ required: true }]} style={{ flex: 1 }}>
+                <InputNumber min={1} precision={0} style={{ width: '100%' }} />
+              </Form.Item>
+              <Form.Item name="defaultCriticalDays" label={t('admin.tenants.defaultCriticalDays')} rules={[{ required: true }]} style={{ flex: 1 }}>
+                <InputNumber min={1} precision={0} style={{ width: '100%' }} />
+              </Form.Item>
             </div>
-
-            {settingsLoading ? (
-              <Text type="secondary">{t('common:messages.loading')}</Text>
-            ) : editingSettings ? (
-              <Form
-                form={settingsForm}
-                layout="vertical"
-                onFinish={(v) => updateSettingsMutation.mutate({ id: currentDetail.id, values: v })}
-              >
-                <Form.Item name="defaultWarningDays" label={t('admin.tenants.defaultWarningDays')} rules={[{ required: true }]}>
-                  <InputNumber min={1} style={{ width: '100%' }} />
-                </Form.Item>
-                <Form.Item name="defaultCriticalDays" label={t('admin.tenants.defaultCriticalDays')} rules={[{ required: true }]}>
-                  <InputNumber min={1} style={{ width: '100%' }} />
-                </Form.Item>
-                <Form.Item name="warningColor" label={t('admin.tenants.warningColor')}>
-                  <ColorPicker />
-                </Form.Item>
-                <Form.Item name="criticalColor" label={t('admin.tenants.criticalColor')}>
-                  <ColorPicker />
-                </Form.Item>
-              </Form>
-            ) : settings ? (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 24px' }}>
-                <div>
-                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>{t('admin.tenants.defaultWarningDays')}</Text>
-                  <Text strong>{settings.defaultWarningDays}</Text>
-                </div>
-                <div>
-                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>{t('admin.tenants.defaultCriticalDays')}</Text>
-                  <Text strong>{settings.defaultCriticalDays}</Text>
-                </div>
-                <div>
-                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>{t('admin.tenants.warningColor')}</Text>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <div style={{ width: 16, height: 16, borderRadius: 4, backgroundColor: settings.warningColor, border: '1px solid rgba(0,0,0,0.1)' }} />
-                    <Text>{settings.warningColor}</Text>
-                  </div>
-                </div>
-                <div>
-                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>{t('admin.tenants.criticalColor')}</Text>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <div style={{ width: 16, height: 16, borderRadius: 4, backgroundColor: settings.criticalColor, border: '1px solid rgba(0,0,0,0.1)' }} />
-                    <Text>{settings.criticalColor}</Text>
-                  </div>
-                </div>
-              </div>
-            ) : null}
-          </>
+            <div style={{ display: 'flex', gap: 12 }}>
+              <Form.Item name="warningColor" label={t('admin.tenants.warningColor')}>
+                <ColorPicker />
+              </Form.Item>
+              <Form.Item name="criticalColor" label={t('admin.tenants.criticalColor')}>
+                <ColorPicker />
+              </Form.Item>
+            </div>
+          </Form>
         )}
       </Drawer>
     </div>

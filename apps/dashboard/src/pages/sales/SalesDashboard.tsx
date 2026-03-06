@@ -22,12 +22,12 @@ function getApiErrorCode(error: unknown): string | undefined {
 }
 
 function getTranslatedError(error: unknown, t: (key: string, opts?: Record<string, string>) => string, fallback: string): string {
-  const code = getApiErrorCode(error);
-  if (code) {
-    const translated = t(`common:errors.${code}`, { defaultValue: '' });
+  const resp = (error as { response?: { data?: { error?: { code?: string; message?: string } } } })?.response?.data?.error;
+  if (resp?.code) {
+    const translated = t(`common:errors.${resp.code}`, { defaultValue: '' });
     if (translated) return translated;
   }
-  return fallback;
+  return resp?.message || fallback;
 }
 
 const orderTypeColors: Record<OrderType, string> = {
@@ -59,7 +59,7 @@ export function SalesDashboard() {
 
   const { data: changeRequests, isLoading: crLoading } = useQuery({
     queryKey: ['change-requests', 'my', userId],
-    queryFn: () => changeRequestsApi.getMy(tenantId!, userId!).then((r) => r.data.items),
+    queryFn: () => changeRequestsApi.getMy({ tenantId: tenantId!, userId: userId! }).then((r) => r.data.items),
     enabled: !!tenantId && !!userId,
   });
 
@@ -191,7 +191,7 @@ export function SalesDashboard() {
       width: 150,
       sorter: (a: ChangeRequestDto, b: ChangeRequestDto) => dayjs(a.createdAt).unix() - dayjs(b.createdAt).unix(),
       defaultSortOrder: 'descend' as const,
-      render: (d: string) => dayjs(d).format('DD.MM.YYYY. HH:mm'),
+      render: (d: string) => dayjs(d).format('DD.MM.YYYY.'),
     },
   ];
 
@@ -287,7 +287,7 @@ export function SalesDashboard() {
             </Col>
             <Col span={10}>
               <Form.Item name="priority" label={t('common:labels.priority')} rules={[{ required: true }]} initialValue={1}>
-                <InputNumber min={1} max={100} style={{ width: '100%' }} />
+                <InputNumber min={1} precision={0} max={100} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
           </Row>

@@ -2,22 +2,22 @@ import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   Typography, Table, Button, Space, Select, Tag, Drawer, Form, Input,
   InputNumber, DatePicker, App, Row, Col, Spin, Popconfirm, Divider,
-  Tooltip, Progress, Card, Statistic,
+  Tooltip, Progress, Statistic, Upload, List,
 } from 'antd';
-import { PlusOutlined, DeleteOutlined, CheckOutlined, PaperClipOutlined } from '@ant-design/icons';
+import { PlusOutlined, DeleteOutlined, CheckOutlined, PaperClipOutlined, UndoOutlined, UploadOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useAuthStore } from '@algreen/auth';
 import { OrderStatus, OrderType, ProcessStatus, ComplexityType, UserRole } from '@algreen/shared-types';
-import type { OrderMasterViewDto, OrderDetailDto, OrderItemDto, ProcessDto, ProductCategoryDto, SpecialRequestTypeDto } from '@algreen/shared-types';
+import type { OrderMasterViewDto, OrderDetailDto, OrderItemDto, ProcessDto, ProductCategoryDto, SpecialRequestTypeDto, AddOrderItemRequest } from '@algreen/shared-types';
 import {
   useCreateOrder, useOrder, useActivateOrder,
   useUpdateOrder, useCancelOrder, usePauseOrder, useResumeOrder,
-  useAddOrderItem, useRemoveOrderItem,
 } from '../../hooks/useOrders';
 import { productCategoriesApi, processesApi, ordersApi, specialRequestTypesApi } from '@algreen/api-client';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { StatusBadge } from '../../components/StatusBadge';
 import { OrderAttachments } from '../../components/OrderAttachments';
+import { compressFile } from '../../utils/compressImage';
 import { useTranslation, useEnumTranslation } from '@algreen/i18n';
 import dayjs from 'dayjs';
 
@@ -63,12 +63,12 @@ function getApiErrorCode(error: unknown): string | undefined {
 }
 
 function getTranslatedError(error: unknown, t: (key: string, opts?: Record<string, string>) => string, fallback: string): string {
-  const code = getApiErrorCode(error);
-  if (code) {
-    const translated = t(`common:errors.${code}`, { defaultValue: '' });
+  const resp = (error as { response?: { data?: { error?: { code?: string; message?: string } } } })?.response?.data?.error;
+  if (resp?.code) {
+    const translated = t(`common:errors.${resp.code}`, { defaultValue: '' });
     if (translated) return translated;
   }
-  return fallback;
+  return resp?.message || fallback;
 }
 
 /** Aggregate process status across all items in an order for a given processId (used in detail drawer) */
@@ -324,16 +324,40 @@ export function OrderListPage() {
   const user = useAuthStore((s) => s.user);
   const tenantId = useAuthStore((s) => s.tenantId);
   const [statusFilter, setStatusFilter] = useState<OrderStatus | undefined>(undefined);
+  const [orderTypeFilter, setOrderTypeFilter] = useState<OrderType | undefined>(undefined);
+  const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [dateFrom, setDateFrom] = useState<dayjs.Dayjs | null>(null);
+  const [dateTo, setDateTo] = useState<dayjs.Dayjs | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 400);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => { setPage(1); }, [debouncedSearch, statusFilter, orderTypeFilter, dateFrom, dateTo]);
+
   const { data: masterResult, isLoading } = useQuery({
-    queryKey: ['orders-master-view', tenantId, statusFilter, page, pageSize],
-    queryFn: () => ordersApi.getMasterView({ tenantId: tenantId!, status: statusFilter, page, pageSize }).then((r) => r.data),
+    queryKey: ['orders-master-view', tenantId, statusFilter, orderTypeFilter, debouncedSearch, dateFrom?.format('YYYY-MM-DD'), dateTo?.format('YYYY-MM-DD'), page, pageSize],
+    queryFn: () => ordersApi.getMasterView({
+      tenantId: tenantId!,
+      status: statusFilter,
+      orderType: orderTypeFilter,
+      search: debouncedSearch || undefined,
+      dateFrom: dateFrom?.format('YYYY-MM-DD'),
+      dateTo: dateTo?.format('YYYY-MM-DD'),
+      page,
+      pageSize,
+    }).then((r) => r.data),
     enabled: !!tenantId,
   });
-  const [createDrawerOpen, setCreateDrawerOpen] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
   const [detailOrderId, setDetailOrderId] = useState<string | null>(null);
   const [addingItem, setAddingItem] = useState(false);
+  const [createPendingItems, setCreatePendingItems] = useState<AddOrderItemRequest[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [localPriority, setLocalPriority] = useState<number | null>(null);
   const priorityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [form] = Form.useForm();
@@ -346,16 +370,14 @@ export function OrderListPage() {
   const resumeOrder = useResumeOrder();
   const { data: detailOrder, isLoading: detailLoading } = useOrder(detailOrderId ?? undefined);
   const activateMutation = useActivateOrder();
-  const addItemMutation = useAddOrderItem(detailOrderId ?? '');
-  const removeItemMutation = useRemoveOrderItem(detailOrderId ?? '');
   const { data: categories } = useQuery({
     queryKey: ['product-categories', tenantId],
-    queryFn: () => productCategoriesApi.getAll(tenantId!).then((r) => r.data.items),
-    enabled: !!tenantId && addingItem,
+    queryFn: () => productCategoriesApi.getAll({ tenantId: tenantId!, pageSize: 100 }).then((r) => r.data.items),
+    enabled: !!tenantId && (addingItem || isCreating || (!!detailOrderId && detailOrder?.status === OrderStatus.Draft)),
   });
   const { data: specialRequestTypes } = useQuery({
     queryKey: ['special-request-types', tenantId],
-    queryFn: () => specialRequestTypesApi.getAll(tenantId!).then((r) => r.data.items),
+    queryFn: () => specialRequestTypesApi.getAll({ tenantId: tenantId!, pageSize: 100 }).then((r) => r.data.items),
     enabled: !!tenantId && !!detailOrderId,
   });
   const srtMap = useMemo(() => {
@@ -370,7 +392,7 @@ export function OrderListPage() {
   // Fetch all processes for master view columns
   const { data: processes } = useQuery({
     queryKey: ['processes', tenantId],
-    queryFn: () => processesApi.getAll(tenantId!).then((r) =>
+    queryFn: () => processesApi.getAll({ tenantId: tenantId!, pageSize: 100 }).then((r) =>
       [...r.data.items].sort((a, b) => a.sequenceOrder - b.sequenceOrder)
     ),
     enabled: !!tenantId,
@@ -385,27 +407,28 @@ export function OrderListPage() {
 
   const queryClient = useQueryClient();
 
+  // ─── Pending state for unified form ──────────────────────
+  const [pendingItems, setPendingItems] = useState<AddOrderItemRequest[]>([]);
+  const [pendingItemRemovals, setPendingItemRemovals] = useState<string[]>([]);
+  const [pendingComplexity, setPendingComplexity] = useState<Map<string, ComplexityType>>(new Map());
+  const [pendingSpecialRequestAdds, setPendingSpecialRequestAdds] = useState<{ itemId: string; specialRequestTypeId: string }[]>([]);
+  const [pendingSpecialRequestRemovals, setPendingSpecialRequestRemovals] = useState<{ itemId: string; specialRequestId: string }[]>([]);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const clearPendingState = useCallback(() => {
+    setPendingItems([]);
+    setPendingItemRemovals([]);
+    setPendingComplexity(new Map());
+    setPendingSpecialRequestAdds([]);
+    setPendingSpecialRequestRemovals([]);
+    setAddingItem(false);
+  }, []);
+
+  const hasPendingChanges = pendingItems.length > 0 || pendingItemRemovals.length > 0 || pendingComplexity.size > 0 || pendingSpecialRequestAdds.length > 0 || pendingSpecialRequestRemovals.length > 0;
+
   const changePriorityMutation = useMutation({
     mutationFn: ({ id, priority }: { id: string; priority: number }) => ordersApi.changePriority(id, priority),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['orders-master-view'] }); },
-  });
-
-  const addSpecialRequestMutation = useMutation({
-    mutationFn: ({ orderId, itemId, specialRequestTypeId }: { orderId: string; itemId: string; specialRequestTypeId: string }) =>
-      ordersApi.addSpecialRequest(orderId, itemId, { specialRequestTypeId }),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['orders', detailOrderId] }); },
-  });
-
-  const removeSpecialRequestMutation = useMutation({
-    mutationFn: ({ orderId, itemId, specialRequestId }: { orderId: string; itemId: string; specialRequestId: string }) =>
-      ordersApi.removeSpecialRequest(orderId, itemId, specialRequestId),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['orders', detailOrderId] }); },
-  });
-
-  const overrideComplexityMutation = useMutation({
-    mutationFn: ({ orderId, itemId, processId, complexity }: { orderId: string; itemId: string; processId: string; complexity: ComplexityType }) =>
-      ordersApi.overrideComplexity(orderId, itemId, processId, { complexity }),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['orders', detailOrderId] }); },
   });
 
   const withdrawMutation = useMutation({
@@ -419,14 +442,21 @@ export function OrderListPage() {
 
   useEffect(() => {
     if (detailOrder) {
-      editForm.setFieldsValue({
-        notes: detailOrder.notes,
-        customWarningDays: detailOrder.customWarningDays,
-        customCriticalDays: detailOrder.customCriticalDays,
-      });
+      if (detailOrder.status === OrderStatus.Draft) {
+        editForm.setFieldsValue({
+          notes: detailOrder.notes,
+          customWarningDays: detailOrder.customWarningDays,
+          customCriticalDays: detailOrder.customCriticalDays,
+        });
+      }
       setLocalPriority(detailOrder.priority);
     }
   }, [detailOrder, editForm]);
+
+  // Clear pending state when order changes
+  useEffect(() => {
+    clearPendingState();
+  }, [detailOrderId, clearPendingState]);
 
   const debouncedPriorityChange = useCallback((orderId: string, val: number) => {
     if (priorityTimerRef.current) clearTimeout(priorityTimerRef.current);
@@ -448,6 +478,8 @@ export function OrderListPage() {
 
   const onCreateFinish = async (values: Record<string, unknown>) => {
     try {
+      // Compress image files before upload
+      const compressedFiles = await Promise.all(pendingFiles.map((f) => compressFile(f)));
       await createOrder.mutateAsync({
         tenantId: tenantId!,
         orderNumber: values.orderNumber as string,
@@ -455,10 +487,17 @@ export function OrderListPage() {
         priority: values.priority as number,
         orderType: values.orderType as OrderType,
         notes: values.notes as string | undefined,
+        customWarningDays: values.customWarningDays as number | undefined,
+        customCriticalDays: values.customCriticalDays as number | undefined,
+        items: createPendingItems.length > 0 ? createPendingItems : undefined,
+        attachments: compressedFiles.length > 0 ? compressedFiles : undefined,
       });
       message.success(t('orders.createdSuccess'));
       form.resetFields();
-      setCreateDrawerOpen(false);
+      setCreatePendingItems([]);
+      setPendingFiles([]);
+      setAddingItem(false);
+      setIsCreating(false);
     } catch (err) {
       message.error(getTranslatedError(err, t, t('orders.createFailed')));
     }
@@ -479,11 +518,10 @@ export function OrderListPage() {
         title: t('orders.orderNumber'),
         dataIndex: 'orderNumber',
         width: 160,
+        sorter: (a, b) => a.orderNumber.localeCompare(b.orderNumber),
         render: (text: string, record: OrderMasterViewDto) => (
           <Space size={4}>
-            <Button type="link" size="small" style={{ padding: 0 }} onClick={() => setDetailOrderId(record.id)}>
-              {text}
-            </Button>
+            <span style={{ fontWeight: 500 }}>{text}</span>
             {record.attachmentCount > 0 && (
               <Tooltip title={`${record.attachmentCount} ${record.attachmentCount === 1 ? 'dokument' : 'dokumenata'}`}>
                 <PaperClipOutlined style={{ color: '#1677ff', fontSize: 13 }} />
@@ -496,6 +534,7 @@ export function OrderListPage() {
         title: t('orders.orderType'),
         dataIndex: 'orderType',
         width: 90,
+        sorter: (a, b) => a.orderType.localeCompare(b.orderType),
         render: (type: OrderType) => (
           <Tag color={orderTypeColors[type]}>{tEnum('OrderType', type)}</Tag>
         ),
@@ -504,10 +543,18 @@ export function OrderListPage() {
         title: t('common:labels.status'),
         dataIndex: 'status',
         width: 110,
-        filters: Object.values(OrderStatus).map((s) => ({ text: tEnum('OrderStatus', s), value: s })),
-        filteredValue: statusFilter ? [statusFilter] : null,
-        filterMultiple: false,
+        sorter: (a, b) => {
+          const order: Record<string, number> = { [OrderStatus.Active]: 0, [OrderStatus.Paused]: 1, [OrderStatus.Draft]: 2, [OrderStatus.Cancelled]: 3, [OrderStatus.Completed]: 4 };
+          return (order[a.status] ?? 5) - (order[b.status] ?? 5);
+        },
         render: (status) => <StatusBadge status={status} />,
+      },
+      {
+        title: t('common:labels.created'),
+        dataIndex: 'createdAt',
+        width: 150,
+        render: (d: string) => d ? dayjs(d).format('DD.MM.YYYY.') : '—',
+        sorter: (a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''),
       },
       {
         title: t('common:labels.deliveryDate'),
@@ -599,11 +646,51 @@ export function OrderListPage() {
           <Button
             type="primary"
             icon={<PlusOutlined />}
-            onClick={() => setCreateDrawerOpen(true)}
+            onClick={() => { form.resetFields(); setCreatePendingItems([]); setPendingFiles([]); setAddingItem(false); setIsCreating(true); }}
           >
             {t('orders.createOrder')}
           </Button>
         )}
+      </div>
+
+      <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+        <Input.Search
+          placeholder={t('common:actions.search')}
+          allowClear
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ width: 220 }}
+        />
+        <Select
+          placeholder={t('orders.filterByStatus')}
+          allowClear
+          value={statusFilter}
+          onChange={(v) => setStatusFilter(v)}
+          style={{ width: 160 }}
+          options={Object.values(OrderStatus).map((s) => ({ label: tEnum('OrderStatus', s), value: s }))}
+        />
+        <Select
+          placeholder={t('orders.orderType')}
+          allowClear
+          value={orderTypeFilter}
+          onChange={(v) => setOrderTypeFilter(v)}
+          style={{ width: 160 }}
+          options={Object.values(OrderType).map((ot) => ({ label: tEnum('OrderType', ot), value: ot }))}
+        />
+        <DatePicker
+          value={dateFrom}
+          onChange={setDateFrom}
+          format="DD.MM.YYYY"
+          allowClear
+          placeholder={t('common:labels.dateFrom')}
+        />
+        <DatePicker
+          value={dateTo}
+          onChange={setDateTo}
+          format="DD.MM.YYYY"
+          allowClear
+          placeholder={t('common:labels.dateTo')}
+        />
       </div>
 
       <Table<OrderMasterViewDto>
@@ -616,19 +703,19 @@ export function OrderListPage() {
           current: page,
           pageSize,
           total: masterResult?.totalCount ?? 0,
+          showSizeChanger: true,
         }}
         scroll={{ x: 'max-content' }}
         size="small"
         bordered
-        onChange={(pagination, filters) => {
+        onRow={(record) => ({
+          onClick: () => setDetailOrderId(record.id),
+          style: { cursor: 'pointer' },
+        })}
+        onChange={(pagination) => {
           if (pagination.current !== page) setPage(pagination.current ?? 1);
           if (pagination.pageSize !== pageSize) {
             setPageSize(pagination.pageSize ?? 20);
-            setPage(1);
-          }
-          const val = filters.status?.[0] as OrderStatus | undefined;
-          if (val !== statusFilter) {
-            setStatusFilter(val);
             setPage(1);
           }
         }}
@@ -648,97 +735,276 @@ export function OrderListPage() {
         }
       `}</style>
 
-      {/* Create Order Drawer */}
+      {/* Unified Order Drawer — handles both create and edit/detail */}
       <Drawer
-        title={t('orders.createOrder')}
-        open={createDrawerOpen}
-        onClose={() => { setCreateDrawerOpen(false); form.resetFields(); }}
-        width={Math.min(480, window.innerWidth)}
+        title={isCreating ? t('orders.createOrder') : detailOrder ? t('orders.order', { number: detailOrder.orderNumber }) : ''}
+        open={isCreating || !!detailOrderId}
+        onClose={() => {
+          if (isCreating) { form.resetFields(); setCreatePendingItems([]); setPendingFiles([]); setAddingItem(false); setIsCreating(false); }
+          else { setDetailOrderId(null); clearPendingState(); setAddingItem(false); }
+        }}
+        width={Math.min(640, window.innerWidth)}
         extra={
-          <Button type="primary" onClick={() => form.submit()} loading={createOrder.isPending}>
-            {t('common:actions.save')}
-          </Button>
+          isCreating ? (
+            <Button type="primary" onClick={() => form.submit()} loading={createOrder.isPending}>
+              {t('common:actions.save')}
+            </Button>
+          ) : detailOrder && detailOrder.status === OrderStatus.Draft && user?.role !== UserRole.SalesManager ? (
+            <Button type="primary" size="small" loading={isSaving} onClick={async () => {
+              try {
+                const values = await editForm.validateFields();
+                setIsSaving(true);
+                try {
+                  const complexityOverrides = Array.from(pendingComplexity.entries()).map(([key, complexity]) => {
+                    const [itemId, processId] = key.split(':');
+                    return { itemId, processId, complexity };
+                  });
+                  await updateOrder.mutateAsync({
+                    id: detailOrder.id,
+                    data: {
+                      notes: values.notes,
+                      customWarningDays: values.customWarningDays,
+                      customCriticalDays: values.customCriticalDays,
+                      addItems: pendingItems.length > 0 ? pendingItems : undefined,
+                      removeItemIds: pendingItemRemovals.length > 0 ? pendingItemRemovals : undefined,
+                      complexityOverrides: complexityOverrides.length > 0 ? complexityOverrides : undefined,
+                      addSpecialRequests: pendingSpecialRequestAdds.length > 0 ? pendingSpecialRequestAdds : undefined,
+                      removeSpecialRequests: pendingSpecialRequestRemovals.length > 0 ? pendingSpecialRequestRemovals : undefined,
+                    },
+                  });
+                  queryClient.invalidateQueries({ queryKey: ['orders', detailOrder.id] });
+                  queryClient.invalidateQueries({ queryKey: ['orders-master-view'] });
+                  clearPendingState();
+                  message.success(t('orders.updatedSuccess'));
+                } catch (err) {
+                  message.error(getTranslatedError(err, t, t('orders.updateFailed')));
+                }
+              } catch {
+                // validation failed
+              } finally {
+                setIsSaving(false);
+              }
+            }}>
+              {t('common:actions.save')}
+            </Button>
+          ) : undefined
         }
       >
-        <Form form={form} layout="vertical" onFinish={onCreateFinish} size="middle">
-          <style>{`.create-order-drawer .ant-form-item-explain { font-size: 12px; }`}</style>
-          <div className="create-order-drawer">
-            <Row gutter={12}>
-              <Col span={14}>
-                <Form.Item
-                  name="orderNumber"
-                  label={t('orders.orderNumberLabel')}
-                  rules={[{ required: true }, { whitespace: true, message: t('common:errors.INVALID_ORDER_NUMBER') }]}
-                >
-                  <Input />
-                </Form.Item>
-              </Col>
-              <Col span={10}>
-                <Form.Item
-                  name="orderType"
-                  label={t('orders.orderType')}
-                  rules={[{ required: true }]}
-                >
-                  <Select
-                    options={Object.values(OrderType).map((ot) => ({ label: tEnum('OrderType', ot), value: ot }))}
-                  />
-                </Form.Item>
-              </Col>
-            </Row>
+        {isCreating ? (
+          <>
+            {/* ── CREATE MODE ── */}
+            <Form form={form} layout="vertical" onFinish={onCreateFinish}>
+              <Row gutter={12}>
+                <Col span={14}>
+                  <Form.Item
+                    name="orderNumber"
+                    label={t('orders.orderNumberLabel')}
+                    rules={[{ required: true }, { whitespace: true, message: t('common:errors.INVALID_ORDER_NUMBER') }]}
+                  >
+                    <Input />
+                  </Form.Item>
+                </Col>
+                <Col span={10}>
+                  <Form.Item
+                    name="orderType"
+                    label={t('orders.orderType')}
+                    rules={[{ required: true }]}
+                  >
+                    <Select options={Object.values(OrderType).map((ot) => ({ label: tEnum('OrderType', ot), value: ot }))} />
+                  </Form.Item>
+                </Col>
+              </Row>
 
-            <Row gutter={12}>
-              <Col span={14}>
-                <Form.Item
-                  name="deliveryDate"
-                  label={t('common:labels.deliveryDate')}
-                  rules={[
-                    { required: true },
-                    {
-                      validator: (_, value) => {
-                        if (!value) return Promise.resolve();
-                        const selected = new Date(value.format ? value.format('YYYY-MM-DD') : value).getTime();
-                        const tomorrow = new Date(dayjs().add(1, 'day').format('YYYY-MM-DD')).getTime();
-                        if (selected < tomorrow) {
-                          return Promise.reject(t('common:errors.INVALID_DATE'));
-                        }
-                        return Promise.resolve();
+              <Row gutter={12}>
+                <Col span={8}>
+                  <Form.Item name="priority" label={t('common:labels.priority')} rules={[{ required: true }, { type: 'number', min: 1, message: t('common:errors.INVALID_PRIORITY') }]} initialValue={1}>
+                    <InputNumber min={1} max={100} precision={0} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={16}>
+                  <Form.Item
+                    name="deliveryDate"
+                    label={t('common:labels.deliveryDate')}
+                    rules={[
+                      { required: true },
+                      {
+                        validator: (_, value) => {
+                          if (!value) return Promise.resolve();
+                          const selected = new Date(value.format ? value.format('YYYY-MM-DD') : value).getTime();
+                          const tomorrow = new Date(dayjs().add(1, 'day').format('YYYY-MM-DD')).getTime();
+                          if (selected < tomorrow) return Promise.reject(t('common:errors.INVALID_DATE'));
+                          return Promise.resolve();
+                        },
                       },
-                    },
+                    ]}
+                  >
+                    <DatePicker style={{ width: '100%' }} disabledDate={(d) => d && d.format('YYYY-MM-DD') <= dayjs().format('YYYY-MM-DD')} />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Form.Item name="notes" label={t('common:labels.notes')}>
+                <Input.TextArea autoSize={{ minRows: 1, maxRows: 3 }} />
+              </Form.Item>
+
+              <Row gutter={12}>
+                <Col span={12}>
+                  <Form.Item name="customWarningDays" label={t('orders.warningDays')}>
+                    <InputNumber min={0} precision={0} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="customCriticalDays" label={t('orders.criticalDays')}>
+                    <InputNumber min={0} precision={0} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+              </Row>
+            </Form>
+
+            <Divider style={{ margin: '12px 0' }} />
+
+            {/* Items section */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <Title level={5} style={{ margin: 0 }}>
+                {t('orders.items', { count: createPendingItems.length })}
+              </Title>
+              {!addingItem && (
+                <Button size="small" icon={<PlusOutlined />} onClick={() => setAddingItem(true)}>
+                  {t('orders.addItem')}
+                </Button>
+              )}
+            </div>
+
+            {/* Add Item form — component={false} prevents nested <form> tag */}
+            {addingItem && (
+              <>
+                <Form form={itemForm} component={false} onFinish={(values) => {
+                  setCreatePendingItems((prev) => [...prev, values as AddOrderItemRequest]);
+                  itemForm.resetFields();
+                  itemForm.setFieldsValue({ quantity: 1 });
+                  setAddingItem(false);
+                }}>
+                  <Row gutter={12}>
+                    <Col span={12}>
+                      <Form.Item name="productCategoryId" label={t('orders.productCategory')} rules={[{ required: true }]}>
+                        <Select options={(categories ?? []).map((c: ProductCategoryDto) => ({ label: c.name, value: c.id }))} />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item name="productName" label={t('orders.productName')} rules={[{ required: true }, { whitespace: true, message: t('common:errors.INVALID_PRODUCT_NAME') }]}>
+                        <Input />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                  <Row gutter={12}>
+                    <Col span={8}>
+                      <Form.Item name="quantity" label={t('orders.quantity')} rules={[{ required: true }, { type: 'number', min: 1, message: t('common:errors.INVALID_QUANTITY') }]} initialValue={1}>
+                        <InputNumber min={1} precision={0} style={{ width: '100%' }} />
+                      </Form.Item>
+                    </Col>
+                    <Col span={16}>
+                      <Form.Item name="notes" label={t('common:labels.notes')}>
+                        <Input.TextArea autoSize={{ minRows: 1, maxRows: 3 }} />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                  <Space style={{ marginBottom: 12 }}>
+                    <Button type="primary" onClick={() => itemForm.submit()}>{t('orders.addItem')}</Button>
+                    <Button onClick={() => { setAddingItem(false); itemForm.resetFields(); }}>{t('common:actions.cancel')}</Button>
+                  </Space>
+                </Form>
+                <Divider style={{ margin: '8px 0' }} />
+              </>
+            )}
+
+            {/* Item cards */}
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              {createPendingItems.map((item, i) => {
+                const cat = (categories ?? []).find((c: ProductCategoryDto) => c.id === item.productCategoryId);
+                return (
+                  <div key={i} style={{ paddingBottom: 12, marginBottom: 12, borderBottom: '1px solid #f0f0f0' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                      <Space>
+                        <Text strong>{item.productName}</Text>
+                        <Tag>{t('orders.qty', { count: item.quantity })}</Tag>
+                        {cat && <Tag color="blue">{cat.name}</Tag>}
+                      </Space>
+                      <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => setCreatePendingItems((prev) => prev.filter((_, idx) => idx !== i))} />
+                    </div>
+                    {item.notes && (
+                      <Text type="secondary" style={{ fontSize: 12 }}>{item.notes}</Text>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Attachments section (staged locally until order is created) */}
+            <Divider style={{ margin: '12px 0' }} />
+            <Text strong style={{ display: 'block', marginBottom: 8 }}>
+              {t('attachments.title')} ({pendingFiles.length}/10)
+            </Text>
+            <Upload
+              beforeUpload={(file) => {
+                if (file.size > 10 * 1024 * 1024) {
+                  message.error(t('attachments.fileTooLarge'));
+                  return false;
+                }
+                setPendingFiles((prev) => [...prev, file]);
+                return false;
+              }}
+              showUploadList={false}
+              accept=".jpg,.jpeg,.png,.pdf"
+              multiple
+              disabled={pendingFiles.length >= 10}
+            >
+              <Button
+                icon={<UploadOutlined />}
+                disabled={pendingFiles.length >= 10}
+                size="small"
+                style={{ marginBottom: 8 }}
+              >
+                {t('attachments.upload')}
+              </Button>
+            </Upload>
+            <List
+              size="small"
+              dataSource={pendingFiles}
+              locale={{ emptyText: t('attachments.noAttachments') }}
+              renderItem={(file: File, index: number) => (
+                <List.Item
+                  style={{ padding: '4px 0' }}
+                  actions={[
+                    <Button
+                      key="delete"
+                      type="text"
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      onClick={() => setPendingFiles((prev) => prev.filter((_, i) => i !== index))}
+                    />,
                   ]}
                 >
-                  <DatePicker style={{ width: '100%' }} disabledDate={(d) => d && d.format('YYYY-MM-DD') <= dayjs().format('YYYY-MM-DD')} />
-                </Form.Item>
-              </Col>
-              <Col span={10}>
-                <Form.Item
-                  name="priority"
-                  label={t('common:labels.priority')}
-                  rules={[{ required: true }, { type: 'number', min: 1, message: t('common:errors.INVALID_PRIORITY') }]}
-                  initialValue={1}
-                >
-                  <InputNumber min={1} max={100} style={{ width: '100%' }} />
-                </Form.Item>
-              </Col>
-            </Row>
-
-            <Form.Item name="notes" label={t('common:labels.notes')}>
-              <Input.TextArea rows={2} />
-            </Form.Item>
-          </div>
-        </Form>
-      </Drawer>
-
-      {/* Order Detail Drawer */}
-      <Drawer
-        title={detailOrder ? t('orders.order', { number: detailOrder.orderNumber }) : ''}
-        open={!!detailOrderId}
-        onClose={() => { setDetailOrderId(null); setAddingItem(false); editForm.resetFields(); itemForm.resetFields(); }}
-        width={Math.min(640, window.innerWidth)}
-      >
-        {detailLoading ? (
+                  <Space size={8}>
+                    <PaperClipOutlined style={{ fontSize: 16, color: '#8c8c8c' }} />
+                    <div>
+                      <Text ellipsis style={{ maxWidth: 200 }}>{file.name}</Text>
+                      <br />
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {file.size < 1024 ? `${file.size} B` : file.size < 1024 * 1024 ? `${(file.size / 1024).toFixed(1)} KB` : `${(file.size / (1024 * 1024)).toFixed(1)} MB`}
+                      </Text>
+                    </div>
+                  </Space>
+                </List.Item>
+              )}
+            />
+          </>
+        ) : detailLoading ? (
           <div style={{ textAlign: 'center', padding: 48 }}><Spin /></div>
         ) : detailOrder ? (
           <>
+            {/* ── DETAIL/EDIT MODE ── */}
+
             {/* Header: tags + action buttons */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16, gap: 8 }}>
               <Space size={4} wrap>
@@ -747,87 +1013,89 @@ export function OrderListPage() {
                 </Text>
                 <StatusText status={detailOrder.status} />
               </Space>
-              <Space size="small" wrap style={{ justifyContent: 'flex-end' }}>
-                {detailOrder.status === OrderStatus.Draft && (
-                  <Button type="primary" size="small" loading={activateMutation.isPending}
-                    onClick={() => {
-                      if (detailOrder.items.length === 0) {
-                        message.error(t('common:errors.NO_ITEMS'));
-                        return;
-                      }
-                      activateMutation.mutate(detailOrder.id, {
-                        onSuccess: () => message.success(t('orders.activatedSuccess')),
-                        onError: (err) => message.error(getTranslatedError(err, t, t('orders.activateFailed'))),
+              {user?.role !== UserRole.SalesManager && (
+                <Space size="small" wrap style={{ justifyContent: 'flex-end' }}>
+                  {detailOrder.status === OrderStatus.Draft && (
+                    <Button type="primary" size="small" loading={activateMutation.isPending}
+                      onClick={() => {
+                        if (detailOrder.items.length === 0) {
+                          message.error(t('common:errors.NO_ITEMS'));
+                          return;
+                        }
+                        activateMutation.mutate(detailOrder.id, {
+                          onSuccess: () => message.success(t('orders.activatedSuccess')),
+                          onError: (err) => message.error(getTranslatedError(err, t, t('orders.activateFailed'))),
+                        });
+                      }}
+                    >{t('orders.activateOrder')}</Button>
+                  )}
+                  {detailOrder.status === OrderStatus.Active && (
+                    <Button size="small" onClick={() => {
+                      pauseOrder.mutate(detailOrder.id, {
+                        onSuccess: () => message.success(t('orders.pausedSuccess')),
+                        onError: (err) => message.error(getTranslatedError(err, t, t('orders.pauseFailed'))),
                       });
-                    }}
-                  >{t('orders.activateOrder')}</Button>
-                )}
-                {detailOrder.status === OrderStatus.Active && (
-                  <Button size="small" onClick={() => {
-                    pauseOrder.mutate(detailOrder.id, {
-                      onSuccess: () => message.success(t('orders.pausedSuccess')),
-                      onError: (err) => message.error(getTranslatedError(err, t, t('orders.pauseFailed'))),
-                    });
-                  }} loading={pauseOrder.isPending}>{t('orders.pauseOrder')}</Button>
-                )}
-                {detailOrder.status === OrderStatus.Paused && (
-                  <Button size="small" onClick={() => {
-                    resumeOrder.mutate(detailOrder.id, {
-                      onSuccess: () => message.success(t('orders.resumedSuccess')),
-                      onError: (err) => message.error(getTranslatedError(err, t, t('orders.resumeFailed'))),
-                    });
-                  }} loading={resumeOrder.isPending}>{t('orders.resumeOrder')}</Button>
-                )}
-                {detailOrder.status === OrderStatus.Active && (
-                  <Button size="small" onClick={() => {
-                    const withdrawForm = modal.confirm({
-                      title: t('orders.withdrawTitle'),
-                      icon: null,
-                      content: (
-                        <Form
-                          id="withdraw-form"
-                          layout="vertical"
-                          style={{ marginTop: 12 }}
-                          onFinish={(vals) => {
-                            withdrawMutation.mutate(
-                              { id: detailOrder.id, data: { targetProcessId: vals.targetProcessId, reason: vals.reason, userId: user!.id } },
-                              {
-                                onSuccess: () => { message.success(t('orders.withdrawSuccess')); withdrawForm.destroy(); },
-                                onError: (err) => message.error(getTranslatedError(err, t, t('orders.withdrawFailed'))),
-                              },
-                            );
-                          }}
-                        >
-                          <Form.Item name="targetProcessId" label={t('orders.withdrawToProcess')} rules={[{ required: true }]}>
-                            <Select options={(processes ?? []).map((p) => ({ label: `${p.code} — ${p.name}`, value: p.id }))} />
-                          </Form.Item>
-                          <Form.Item name="reason" label={t('orders.withdrawReason')} rules={[{ required: true }]}>
-                            <Input.TextArea rows={2} />
-                          </Form.Item>
-                        </Form>
-                      ),
-                      okButtonProps: { htmlType: 'submit', form: 'withdraw-form' },
-                      okText: t('common:actions.confirm'),
-                      cancelText: t('common:actions.cancel'),
-                    });
-                  }}>{t('orders.withdraw')}</Button>
-                )}
-                {detailOrder.status !== OrderStatus.Cancelled && detailOrder.status !== OrderStatus.Completed && (
-                  <Popconfirm
-                    title={t('orders.cancelConfirm')}
-                    okText={t('common:actions.confirm')}
-                    cancelText={t('common:actions.no')}
-                    onConfirm={() => {
-                      cancelOrder.mutate(detailOrder.id, {
-                        onSuccess: () => message.success(t('orders.cancelledSuccess')),
-                        onError: (err) => message.error(getTranslatedError(err, t, t('orders.cancelFailed'))),
+                    }} loading={pauseOrder.isPending}>{t('orders.pauseOrder')}</Button>
+                  )}
+                  {detailOrder.status === OrderStatus.Paused && (
+                    <Button size="small" onClick={() => {
+                      resumeOrder.mutate(detailOrder.id, {
+                        onSuccess: () => message.success(t('orders.resumedSuccess')),
+                        onError: (err) => message.error(getTranslatedError(err, t, t('orders.resumeFailed'))),
                       });
-                    }}
-                  >
-                    <Button size="small" danger loading={cancelOrder.isPending}>{t('orders.cancelOrder')}</Button>
-                  </Popconfirm>
-                )}
-              </Space>
+                    }} loading={resumeOrder.isPending}>{t('orders.resumeOrder')}</Button>
+                  )}
+                  {detailOrder.status === OrderStatus.Active && (
+                    <Button size="small" onClick={() => {
+                      const withdrawForm = modal.confirm({
+                        title: t('orders.withdrawTitle'),
+                        icon: null,
+                        content: (
+                          <Form
+                            id="withdraw-form"
+                            layout="vertical"
+                            style={{ marginTop: 12 }}
+                            onFinish={(vals) => {
+                              withdrawMutation.mutate(
+                                { id: detailOrder.id, data: { targetProcessId: vals.targetProcessId, reason: vals.reason, userId: user!.id } },
+                                {
+                                  onSuccess: () => { message.success(t('orders.withdrawSuccess')); withdrawForm.destroy(); },
+                                  onError: (err) => message.error(getTranslatedError(err, t, t('orders.withdrawFailed'))),
+                                },
+                              );
+                            }}
+                          >
+                            <Form.Item name="targetProcessId" label={t('orders.withdrawToProcess')} rules={[{ required: true }]}>
+                              <Select options={(processes ?? []).map((p) => ({ label: `${p.code} — ${p.name}`, value: p.id }))} />
+                            </Form.Item>
+                            <Form.Item name="reason" label={t('orders.withdrawReason')} rules={[{ required: true }]}>
+                              <Input.TextArea rows={2} />
+                            </Form.Item>
+                          </Form>
+                        ),
+                        okButtonProps: { htmlType: 'submit', form: 'withdraw-form' },
+                        okText: t('common:actions.confirm'),
+                        cancelText: t('common:actions.cancel'),
+                      });
+                    }}>{t('orders.withdraw')}</Button>
+                  )}
+                  {detailOrder.status !== OrderStatus.Cancelled && detailOrder.status !== OrderStatus.Completed && (
+                    <Popconfirm
+                      title={t('orders.cancelConfirm')}
+                      okText={t('common:actions.confirm')}
+                      cancelText={t('common:actions.no')}
+                      onConfirm={() => {
+                        cancelOrder.mutate(detailOrder.id, {
+                          onSuccess: () => message.success(t('orders.cancelledSuccess')),
+                          onError: (err) => message.error(getTranslatedError(err, t, t('orders.cancelFailed'))),
+                        });
+                      }}
+                    >
+                      <Button size="small" danger loading={cancelOrder.isPending}>{t('orders.cancelOrder')}</Button>
+                    </Popconfirm>
+                  )}
+                </Space>
+              )}
             </div>
 
             {/* A) Stats Row */}
@@ -837,11 +1105,11 @@ export function OrderListPage() {
                   <Text type="secondary" style={{ fontSize: 13, display: 'block', marginBottom: 4 }}>{t('common:labels.priority')}</Text>
                   <Space size={4}>
                     <InputNumber
-                      size="small"
                       min={1}
                       max={100}
+                      precision={0}
                       value={localPriority}
-                      style={{ width: 64 }}
+                      style={{ width: 80 }}
                       disabled={detailOrder.status === OrderStatus.Cancelled || detailOrder.status === OrderStatus.Completed}
                       onChange={(val) => {
                         if (val != null) {
@@ -873,7 +1141,7 @@ export function OrderListPage() {
             </Row>
 
             {/* B) Process Timeline */}
-            {processes && processes.length > 0 && (
+            {processes && processes.length > 0 && detailOrder.items.length > 0 && (
               <div style={{ marginBottom: 20 }}>
                 <Text type="secondary" style={{ fontSize: 12, marginBottom: 4, display: 'block' }}>
                   {t('orders.processFlow')}
@@ -896,16 +1164,14 @@ export function OrderListPage() {
               )}
             </div>
 
-            {/* Add Item form */}
+            {/* Add Item form — component={false} prevents nested <form> tag */}
             {addingItem && (
               <>
-                <Form form={itemForm} layout="vertical" size="middle" onFinish={async (values) => {
-                  try {
-                    await addItemMutation.mutateAsync(values);
-                    message.success(t('orders.addItemSuccess'));
-                    itemForm.resetFields();
-                    setAddingItem(false);
-                  } catch (err) { message.error(getTranslatedError(err, t, t('orders.addItemFailed'))); }
+                <Form form={itemForm} component={false} onFinish={(values) => {
+                  setPendingItems((prev) => [...prev, values as AddOrderItemRequest]);
+                  itemForm.resetFields();
+                  itemForm.setFieldsValue({ quantity: 1 });
+                  setAddingItem(false);
                 }}>
                   <Row gutter={12}>
                     <Col span={12}>
@@ -924,7 +1190,7 @@ export function OrderListPage() {
                   <Row gutter={12}>
                     <Col span={8}>
                       <Form.Item name="quantity" label={t('orders.quantity')} rules={[{ required: true }, { type: 'number', min: 1, message: t('common:errors.INVALID_QUANTITY') }]} initialValue={1}>
-                        <InputNumber min={1} style={{ width: '100%' }} />
+                        <InputNumber min={1} precision={0} style={{ width: '100%' }} />
                       </Form.Item>
                     </Col>
                     <Col span={16}>
@@ -934,7 +1200,7 @@ export function OrderListPage() {
                     </Col>
                   </Row>
                   <Space style={{ marginBottom: 12 }}>
-                    <Button type="primary" htmlType="submit" loading={addItemMutation.isPending}>{t('common:actions.save')}</Button>
+                    <Button type="primary" onClick={() => itemForm.submit()}>{t('orders.addItem')}</Button>
                     <Button onClick={() => setAddingItem(false)}>{t('common:actions.cancel')}</Button>
                   </Space>
                 </Form>
@@ -942,166 +1208,190 @@ export function OrderListPage() {
               </>
             )}
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {detailOrder.items.map((item: OrderItemDto) => (
-                <Card
-                  key={item.id}
-                  size="small"
-                  title={
-                    <Space>
-                      <span>{item.productName}</span>
-                      <Tag>{t('orders.qty', { count: item.quantity })}</Tag>
-                    </Space>
-                  }
-                  extra={detailOrder.status === OrderStatus.Draft && (
-                    <Popconfirm
-                      title={t('orders.cancelConfirm')}
-                      onConfirm={() => {
-                        removeItemMutation.mutate(item.id, {
-                          onSuccess: () => message.success(t('orders.removeItemSuccess')),
-                          onError: (err) => message.error(getTranslatedError(err, t, t('orders.removeItemFailed'))),
-                        });
-                      }}
-                    >
-                      <Button type="text" danger size="small" icon={<DeleteOutlined />} />
-                    </Popconfirm>
-                  )}
-                >
-                  <ItemProcessBar item={item} processMap={processMap} tEnum={tEnum} />
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              {detailOrder.items.map((item: OrderItemDto) => {
+                const isRemoved = pendingItemRemovals.includes(item.id);
+                const isDraft = detailOrder.status === OrderStatus.Draft;
+                return (
+                  <div key={item.id} style={{ paddingBottom: 12, marginBottom: 12, borderBottom: '1px solid #f0f0f0', ...(isRemoved ? { opacity: 0.4 } : {}) }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                      <Space>
+                        <Text strong style={isRemoved ? { textDecoration: 'line-through' } : undefined}>{item.productName}</Text>
+                        <Tag>{t('orders.qty', { count: item.quantity })}</Tag>
+                      </Space>
+                      {isDraft && (
+                        isRemoved ? (
+                          <Button type="text" size="small" icon={<UndoOutlined />} onClick={() => setPendingItemRemovals((prev) => prev.filter((id) => id !== item.id))} />
+                        ) : (
+                          <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => setPendingItemRemovals((prev) => [...prev, item.id])} />
+                        )
+                      )}
+                    </div>
 
-                  {/* Special Requests */}
-                  <div style={{ marginTop: 8 }}>
-                    <Text type="secondary" style={{ fontSize: 11 }}>{t('orders.specialRequests')}: </Text>
-                    {item.specialRequests.length > 0 ? (
-                      item.specialRequests.map((sr) => {
-                        const srt = srtMap.get(sr.specialRequestTypeId);
+                    <ItemProcessBar item={item} processMap={processMap} tEnum={tEnum} />
+
+                    {/* Special Requests */}
+                    <div style={{ marginTop: 8 }}>
+                      <Text type="secondary" style={{ fontSize: 11 }}>{t('orders.specialRequests')}: </Text>
+                      {item.specialRequests.length > 0 ? (
+                        item.specialRequests.map((sr) => {
+                          const srt = srtMap.get(sr.specialRequestTypeId);
+                          const isPendingRemoval = pendingSpecialRequestRemovals.some((r) => r.specialRequestId === sr.id);
+                          return (
+                            <Tag
+                              key={sr.id}
+                              color={isPendingRemoval ? undefined : 'purple'}
+                              closable={isDraft && !isPendingRemoval}
+                              onClose={(e) => {
+                                e.preventDefault();
+                                setPendingSpecialRequestRemovals((prev) => [...prev, { itemId: item.id, specialRequestId: sr.id }]);
+                              }}
+                              style={{ marginBottom: 2, textDecoration: isPendingRemoval ? 'line-through' : undefined, opacity: isPendingRemoval ? 0.5 : undefined }}
+                            >
+                              {srt ? srt.name : sr.specialRequestTypeId.slice(0, 8)}
+                            </Tag>
+                          );
+                        })
+                      ) : pendingSpecialRequestAdds.filter((a) => a.itemId === item.id).length === 0 ? (
+                        <Text type="secondary" style={{ fontSize: 11 }}>—</Text>
+                      ) : null}
+                      {pendingSpecialRequestAdds.filter((a) => a.itemId === item.id).map((a, i) => {
+                        const srt = srtMap.get(a.specialRequestTypeId);
                         return (
                           <Tag
-                            key={sr.id}
+                            key={`pending-sr-${i}`}
                             color="purple"
-                            closable={detailOrder.status === OrderStatus.Draft}
+                            closable
                             onClose={(e) => {
                               e.preventDefault();
-                              removeSpecialRequestMutation.mutate(
-                                { orderId: detailOrder.id, itemId: item.id, specialRequestId: sr.id },
-                                { onSuccess: () => message.success(t('orders.specialRequestRemoved')) },
-                              );
+                              setPendingSpecialRequestAdds((prev) => prev.filter((p) => !(p.itemId === a.itemId && p.specialRequestTypeId === a.specialRequestTypeId)));
                             }}
-                            style={{ marginBottom: 2 }}
+                            style={{ marginBottom: 2, borderStyle: 'dashed' }}
                           >
-                            {srt ? srt.name : sr.specialRequestTypeId.slice(0, 8)}
+                            {srt ? srt.name : a.specialRequestTypeId.slice(0, 8)}
                           </Tag>
                         );
-                      })
-                    ) : (
-                      <Text type="secondary" style={{ fontSize: 11 }}>—</Text>
+                      })}
+                      {isDraft && (
+                        <Select
+                          size="small"
+                          placeholder={`+ ${t('common:actions.add')}`}
+                          style={{ width: 140, marginLeft: 4 }}
+                          value={undefined}
+                          options={(specialRequestTypes ?? [])
+                            .filter((srt) => srt.isActive
+                              && !item.specialRequests.some((sr) => sr.specialRequestTypeId === srt.id && !pendingSpecialRequestRemovals.some((r) => r.specialRequestId === sr.id))
+                              && !pendingSpecialRequestAdds.some((a) => a.itemId === item.id && a.specialRequestTypeId === srt.id))
+                            .map((srt) => ({ label: srt.name, value: srt.id }))}
+                          onChange={(val) => {
+                            if (val) {
+                              setPendingSpecialRequestAdds((prev) => [...prev, { itemId: item.id, specialRequestTypeId: val }]);
+                            }
+                          }}
+                        />
+                      )}
+                    </div>
+
+                    {/* Complexity overrides */}
+                    {detailOrder.status !== OrderStatus.Cancelled && item.processes.filter((p) => p.status !== ProcessStatus.Withdrawn).length > 0 && (
+                      <div style={{ marginTop: 6 }}>
+                        <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 2 }}>{t('orders.complexityOverrides')}:</Text>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          {[...item.processes]
+                            .filter((p) => p.status !== ProcessStatus.Withdrawn)
+                            .sort((a, b) => {
+                              const pa = processMap.get(a.processId);
+                              const pb = processMap.get(b.processId);
+                              return (pa?.sequenceOrder ?? 0) - (pb?.sequenceOrder ?? 0);
+                            })
+                            .map((proc) => {
+                              const process = processMap.get(proc.processId);
+                              const pendingKey = `${item.id}:${proc.id}`;
+                              const pendingVal = pendingComplexity.get(pendingKey);
+                              const displayVal = pendingVal ?? proc.complexity;
+                              return (
+                                <Tooltip key={proc.id} title={process?.name ?? proc.processId}>
+                                  <Select
+                                    size="small"
+                                    value={displayVal}
+                                    placeholder={process?.code ?? '?'}
+                                    allowClear
+                                    disabled={!isDraft}
+                                    style={{ width: 100, ...(pendingVal ? { borderColor: '#1677ff' } : {}) }}
+                                    popupMatchSelectWidth={false}
+                                    options={Object.values(ComplexityType).map((c) => ({
+                                      label: `${process?.code ?? '?'} ${tEnum('ComplexityType', c)}`,
+                                      value: c,
+                                    }))}
+                                    onChange={(val) => {
+                                      if (val) {
+                                        setPendingComplexity((prev) => {
+                                          const next = new Map(prev);
+                                          if (val === proc.complexity) {
+                                            next.delete(pendingKey);
+                                          } else {
+                                            next.set(pendingKey, val);
+                                          }
+                                          return next;
+                                        });
+                                      }
+                                    }}
+                                  />
+                                </Tooltip>
+                              );
+                            })}
+                        </div>
+                      </div>
                     )}
-                    {detailOrder.status === OrderStatus.Draft && (
-                      <Select
-                        size="small"
-                        placeholder={`+ ${t('common:actions.add')}`}
-                        style={{ width: 140, marginLeft: 4 }}
-                        value={undefined}
-                        options={(specialRequestTypes ?? [])
-                          .filter((srt) => srt.isActive && !item.specialRequests.some((sr) => sr.specialRequestTypeId === srt.id))
-                          .map((srt) => ({ label: srt.name, value: srt.id }))}
-                        onChange={(val) => {
-                          if (val) {
-                            addSpecialRequestMutation.mutate(
-                              { orderId: detailOrder.id, itemId: item.id, specialRequestTypeId: val },
-                              { onSuccess: () => message.success(t('orders.specialRequestAdded')) },
-                            );
-                          }
-                        }}
-                      />
+
+                    {item.notes && (
+                      <Text type="secondary" style={{ fontSize: 12, marginTop: 8, display: 'block' }}>
+                        {item.notes}
+                      </Text>
                     )}
                   </div>
+                );
+              })}
 
-                  {/* Complexity overrides */}
-                  {detailOrder.status !== OrderStatus.Cancelled && item.processes.filter((p) => p.status !== ProcessStatus.Withdrawn).length > 0 && (
-                    <div style={{ marginTop: 6 }}>
-                      <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 2 }}>{t('orders.complexityOverrides')}:</Text>
-                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                        {[...item.processes]
-                          .filter((p) => p.status !== ProcessStatus.Withdrawn)
-                          .sort((a, b) => {
-                            const pa = processMap.get(a.processId);
-                            const pb = processMap.get(b.processId);
-                            return (pa?.sequenceOrder ?? 0) - (pb?.sequenceOrder ?? 0);
-                          })
-                          .map((proc) => {
-                            const process = processMap.get(proc.processId);
-                            return (
-                              <Tooltip key={proc.id} title={process?.name ?? proc.processId}>
-                                <Select
-                                  size="small"
-                                  value={proc.complexity}
-                                  placeholder={process?.code ?? '?'}
-                                  allowClear
-                                  style={{ width: 72 }}
-                                  popupMatchSelectWidth={false}
-                                  options={Object.values(ComplexityType).map((c) => ({
-                                    label: `${process?.code ?? '?'} ${tEnum('ComplexityType', c)}`,
-                                    value: c,
-                                  }))}
-                                  onChange={(val) => {
-                                    if (val) {
-                                      overrideComplexityMutation.mutate(
-                                        { orderId: detailOrder.id, itemId: item.id, processId: proc.id, complexity: val },
-                                        {
-                                          onSuccess: () => message.success(t('orders.complexityOverridden')),
-                                          onError: (err) => message.error(getTranslatedError(err, t, t('orders.complexityOverrideFailed'))),
-                                        },
-                                      );
-                                    }
-                                  }}
-                                />
-                              </Tooltip>
-                            );
-                          })}
-                      </div>
+              {/* Pending new items */}
+              {pendingItems.map((item, i) => {
+                const cat = (categories ?? []).find((c: ProductCategoryDto) => c.id === item.productCategoryId);
+                return (
+                  <div key={`pending-${i}`} style={{ paddingBottom: 12, marginBottom: 12, borderBottom: '2px dashed #1677ff' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                      <Space>
+                        <Text strong>{item.productName}</Text>
+                        <Tag>{t('orders.qty', { count: item.quantity })}</Tag>
+                        {cat && <Tag color="blue">{cat.name}</Tag>}
+                      </Space>
+                      <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => setPendingItems((prev) => prev.filter((_, idx) => idx !== i))} />
                     </div>
-                  )}
-
-                  {item.notes && (
-                    <Text type="secondary" style={{ fontSize: 12, marginTop: 8, display: 'block' }}>
-                      {item.notes}
-                    </Text>
-                  )}
-                </Card>
-              ))}
+                    {item.notes && (
+                      <Text type="secondary" style={{ fontSize: 12 }}>{item.notes}</Text>
+                    )}
+                  </div>
+                );
+              })}
             </div>
 
-            {/* D) Notes / Draft edit form */}
+            {/* D) Notes & Settings */}
             {detailOrder.status === OrderStatus.Draft ? (
-              <Form form={editForm} layout="vertical" size="middle" style={{ marginTop: 20 }} onFinish={async (values) => {
-                try {
-                  await updateOrder.mutateAsync({ id: detailOrder.id, data: values });
-                  message.success(t('orders.updatedSuccess'));
-                } catch (err) { message.error(getTranslatedError(err, t, t('orders.updateFailed'))); }
-              }}>
-                <Row gutter={12}>
-                  <Col span={24}>
-                    <Form.Item name="notes" label={t('common:labels.notes')}>
-                      <Input.TextArea autoSize={{ minRows: 1, maxRows: 3 }} />
-                    </Form.Item>
-                  </Col>
-                </Row>
+              <Form form={editForm} layout="vertical" style={{ marginTop: 20 }}>
+                <Form.Item name="notes" label={t('common:labels.notes')} style={{ marginBottom: 12 }}>
+                  <Input.TextArea autoSize={{ minRows: 1, maxRows: 3 }} />
+                </Form.Item>
                 <Row gutter={12}>
                   <Col span={12}>
-                    <Form.Item name="customWarningDays" label={t('orders.warningDays')}>
-                      <InputNumber min={0} style={{ width: '100%' }} />
+                    <Form.Item name="customWarningDays" label={t('orders.warningDays')} style={{ marginBottom: 0 }}>
+                      <InputNumber min={0} precision={0} style={{ width: '100%' }} />
                     </Form.Item>
                   </Col>
                   <Col span={12}>
-                    <Form.Item name="customCriticalDays" label={t('orders.criticalDays')}>
-                      <InputNumber min={0} style={{ width: '100%' }} />
+                    <Form.Item name="customCriticalDays" label={t('orders.criticalDays')} style={{ marginBottom: 0 }}>
+                      <InputNumber min={0} precision={0} style={{ width: '100%' }} />
                     </Form.Item>
                   </Col>
                 </Row>
-                <Button type="primary" htmlType="submit" size="small" loading={updateOrder.isPending}>
-                  {t('common:actions.save')}
-                </Button>
               </Form>
             ) : detailOrder.notes ? (
               <div style={{ marginTop: 20 }}>
@@ -1112,8 +1402,7 @@ export function OrderListPage() {
               </div>
             ) : null}
 
-            {/* E) Attachments */}
-            <Divider style={{ margin: '12px 0' }} />
+            {/* E) Attachments — inline, same pattern as create mode */}
             <OrderAttachments orderId={detailOrder.id} />
           </>
         ) : (

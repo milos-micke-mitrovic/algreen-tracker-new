@@ -6,10 +6,8 @@ import type {
 import { apiClient } from '../axios-instance';
 
 export const specialRequestTypesApi = {
-  getAll(tenantId: string) {
-    return apiClient.get<PagedResult<SpecialRequestTypeDto>>('/special-request-types', {
-      params: { tenantId },
-    });
+  getAll(params: { tenantId: string; isActive?: boolean; search?: string; page?: number; pageSize?: number; createdFrom?: string; createdTo?: string }) {
+    return apiClient.get<PagedResult<SpecialRequestTypeDto>>('/special-request-types', { params });
   },
 
   create(data: CreateSpecialRequestTypeRequest) {
@@ -22,5 +20,9 @@ export const specialRequestTypesApi = {
 
   deactivate(id: string) {
     return apiClient.delete(`/special-request-types/${id}`);
+  },
+
+  activate(id: string) {
+    return apiClient.post(`/special-request-types/${id}/activate`);
   },
 };

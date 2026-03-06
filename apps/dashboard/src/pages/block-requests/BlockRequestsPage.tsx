@@ -1,5 +1,14 @@
-import { useState } from 'react';
-import { Typography, Table, Space, Button, App, Popconfirm, Modal, Input } from 'antd';
+import { useState, useEffect } from 'react';
+import { Typography, Table, Space, Button, App, Popconfirm, Modal, Input, Select, DatePicker } from 'antd';
+
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { blockRequestsApi } from '@algreen/api-client';
 import { useAuthStore } from '@algreen/auth';
@@ -16,18 +25,24 @@ function getApiErrorCode(error: unknown): string | undefined {
 }
 
 function getTranslatedError(error: unknown, t: (key: string, opts?: Record<string, string>) => string, fallback: string): string {
-  const code = getApiErrorCode(error);
-  if (code) {
-    const translated = t(`common:errors.${code}`, { defaultValue: '' });
+  const resp = (error as { response?: { data?: { error?: { code?: string; message?: string } } } })?.response?.data?.error;
+  if (resp?.code) {
+    const translated = t(`common:errors.${resp.code}`, { defaultValue: '' });
     if (translated) return translated;
   }
-  return fallback;
+  return resp?.message || fallback;
 }
 
 export function BlockRequestsPage() {
   const tenantId = useAuthStore((s) => s.tenantId);
   const userId = useAuthStore((s) => s.user?.id);
   const [statusFilter, setStatusFilter] = useState<RequestStatus | undefined>(undefined);
+  const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 400);
+  const [dateFrom, setDateFrom] = useState<dayjs.Dayjs | null>(null);
+  const [dateTo, setDateTo] = useState<dayjs.Dayjs | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [approveTarget, setApproveTarget] = useState<string | null>(null);
   const [approveNote, setApproveNote] = useState('');
   const queryClient = useQueryClient();
@@ -35,9 +50,19 @@ export function BlockRequestsPage() {
   const { t } = useTranslation('dashboard');
   const { tEnum } = useEnumTranslation();
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['block-requests', tenantId, statusFilter],
-    queryFn: () => blockRequestsApi.getAll(tenantId!, statusFilter).then((r) => r.data.items),
+  useEffect(() => { setPage(1); }, [debouncedSearch, statusFilter, dateFrom, dateTo]);
+
+  const { data: pagedResult, isLoading } = useQuery({
+    queryKey: ['block-requests', tenantId, statusFilter, debouncedSearch, dateFrom?.format('YYYY-MM-DD'), dateTo?.format('YYYY-MM-DD'), page, pageSize],
+    queryFn: () => blockRequestsApi.getAll({
+      tenantId: tenantId!,
+      status: statusFilter,
+      search: debouncedSearch || undefined,
+      createdFrom: dateFrom?.format('YYYY-MM-DD'),
+      createdTo: dateTo?.format('YYYY-MM-DD'),
+      page,
+      pageSize,
+    }).then((r) => r.data),
     enabled: !!tenantId,
   });
 
@@ -68,12 +93,14 @@ export function BlockRequestsPage() {
       title: t('common:labels.status'),
       dataIndex: 'status',
       width: 110,
-      filters: Object.values(RequestStatus).map((s) => ({ text: tEnum('RequestStatus', s), value: s })),
-      filteredValue: statusFilter ? [statusFilter] : null,
-      filterMultiple: false,
       render: (s: RequestStatus) => <StatusBadge status={s} />,
     },
-    { title: t('blockRequests.note'), dataIndex: 'requestNote', ellipsis: true },
+    {
+      title: t('common:labels.description'),
+      dataIndex: 'requestNote',
+      ellipsis: true,
+      sorter: (a: BlockRequestDto, b: BlockRequestDto) => (a.requestNote ?? '').localeCompare(b.requestNote ?? ''),
+    },
     {
       title: t('blockRequests.response'),
       key: 'response',
@@ -94,7 +121,14 @@ export function BlockRequestsPage() {
       width: 150,
       sorter: (a: BlockRequestDto, b: BlockRequestDto) => dayjs(a.createdAt).unix() - dayjs(b.createdAt).unix(),
       defaultSortOrder: 'descend' as const,
-      render: (d: string) => dayjs(d).format('DD.MM.YYYY. HH:mm'),
+      render: (d: string) => dayjs(d).format('DD.MM.YYYY.'),
+    },
+    {
+      title: t('common:labels.handledAt'),
+      dataIndex: 'updatedAt',
+      width: 150,
+      render: (d: string | null) => d ? dayjs(d).format('DD.MM.YYYY.') : '—',
+      sorter: (a: BlockRequestDto, b: BlockRequestDto) => (a.updatedAt ?? '').localeCompare(b.updatedAt ?? ''),
     },
     {
       title: t('common:labels.actions'),
@@ -135,15 +169,51 @@ export function BlockRequestsPage() {
   return (
     <div>
       <Title level={4} style={{ marginBottom: 16 }}>{t('blockRequests.title')}</Title>
+
+      <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+        <Input.Search
+          placeholder={t('common:actions.search')}
+          allowClear
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ width: 260 }}
+        />
+        <Select
+          placeholder={t('common:labels.status')}
+          allowClear
+          value={statusFilter}
+          onChange={(v) => setStatusFilter(v)}
+          style={{ width: 160 }}
+          options={Object.values(RequestStatus).map((s) => ({ label: tEnum('RequestStatus', s), value: s }))}
+        />
+        <DatePicker
+          value={dateFrom}
+          onChange={setDateFrom}
+          format="DD.MM.YYYY"
+          allowClear
+          placeholder={t('common:labels.dateFrom')}
+        />
+        <DatePicker
+          value={dateTo}
+          onChange={setDateTo}
+          format="DD.MM.YYYY"
+          allowClear
+          placeholder={t('common:labels.dateTo')}
+        />
+      </div>
+
       <Table
         columns={columns}
-        dataSource={data}
+        dataSource={pagedResult?.items}
         rowKey="id"
         loading={isLoading}
         scroll={{ x: 'max-content' }}
-        onChange={(_pagination, filters) => {
-          const val = filters.status?.[0] as RequestStatus | undefined;
-          setStatusFilter(val);
+        pagination={{
+          current: page,
+          pageSize,
+          total: pagedResult?.totalCount,
+          onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+          showSizeChanger: true,
         }}
       />
 

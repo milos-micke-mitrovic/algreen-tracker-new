@@ -249,16 +249,19 @@ function QueueCard({
     (new Date(item.deliveryDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24),
   );
 
+  const isBlocked = item.status === ProcessStatus.Blocked;
+  const isInProgress = item.status === ProcessStatus.InProgress;
+  const isPaused = isInProgress && activeWork != null && !activeWork.isTimerRunning;
+
+  // Color: urgency takes priority, then started vs non-started
   const urgencyColor =
     daysUntilDelivery <= 3
       ? 'bg-red-100 border-red-300'
       : daysUntilDelivery <= 5
         ? 'bg-yellow-50 border-yellow-300'
-        : 'bg-white border-gray-200';
-
-  const isBlocked = item.status === ProcessStatus.Blocked;
-  const isInProgress = item.status === ProcessStatus.InProgress;
-  const isPaused = isInProgress && activeWork != null && !activeWork.isTimerRunning;
+        : isInProgress
+          ? 'bg-amber-50 border-l-4 border-amber-400'
+          : 'bg-white border-gray-200';
 
   useEffect(() => {
     if (isHighlighted && cardRef.current) {
@@ -376,6 +379,7 @@ function WorkPanel({
   const isWorking = activeWork?.status === ProcessStatus.InProgress;
   const isTimerRunning = activeWork?.isTimerRunning ?? false;
   const isPaused = isWorking && !isTimerRunning;
+  const hasSubProcesses = (activeWork?.subProcesses?.length ?? 0) > 0;
 
   // Check if all sub-processes are completed/withdrawn (ready for process completion)
   const allSubsDone = activeWork?.subProcesses?.every(
@@ -440,7 +444,7 @@ function WorkPanel({
       setError(null);
       await invalidateAndWait(['tablet-active']);
     },
-    onError: (err) => handleError(err, 'work.startFailed'),
+    onError: (err) => handleError(err, 'work.resumeFailed'),
   });
 
   const completeMutation = useMutation({
@@ -604,7 +608,7 @@ function WorkPanel({
           >
             {t('work.start')}
           </BigButton>
-        ) : (
+        ) : hasSubProcesses ? (
           <>
             {isTimerRunning ? (
               <BigButton
@@ -631,6 +635,13 @@ function WorkPanel({
               </BigButton>
             )}
           </>
+        ) : (
+          <BigButton
+            onClick={() => { setError(null); setShowCompleteConfirm(true); }}
+            loading={completeMutation.isPending || pendingAction}
+          >
+            {t('work.complete')}
+          </BigButton>
         )}
 
         <BigButton

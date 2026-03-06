@@ -46,6 +46,8 @@ export interface ShiftDto {
   startTime: string;
   endTime: string;
   isActive: boolean;
+  createdAt: string;
+  updatedAt: string | null;
 }
 
 export interface LoginResponseDto {
@@ -137,6 +139,7 @@ export interface OrderMasterViewDto {
   /** Map of processId → aggregated ProcessStatus string */
   processStatuses: Record<string, string>;
   attachmentCount: number;
+  createdAt: string;
 }
 
 // ─── Block & Change Requests ─────────────────────────────
@@ -149,6 +152,7 @@ export interface BlockRequestDto {
   requestNote: string | null;
   status: RequestStatus;
   createdAt: string;
+  updatedAt: string | null;
   handledByUserId: string | null;
   handledAt: string | null;
   blockReason: string | null;
@@ -163,6 +167,7 @@ export interface ChangeRequestDto {
   description: string;
   status: RequestStatus;
   createdAt: string;
+  updatedAt: string | null;
   handledByUserId: string | null;
   handledAt: string | null;
   responseNote: string | null;
@@ -204,6 +209,8 @@ export interface ProcessDto {
   name: string;
   sequenceOrder: number;
   isActive: boolean;
+  createdAt: string;
+  updatedAt: string | null;
   subProcesses: SubProcessDto[];
 }
 
@@ -221,6 +228,8 @@ export interface ProductCategoryDto {
   name: string;
   description: string | null;
   isActive: boolean;
+  createdAt: string;
+  updatedAt: string | null;
 }
 
 export interface ProductCategoryDetailDto {
@@ -229,6 +238,8 @@ export interface ProductCategoryDetailDto {
   name: string;
   description: string | null;
   isActive: boolean;
+  createdAt: string;
+  updatedAt: string | null;
   processes: ProductCategoryProcessDto[];
   dependencies: ProductCategoryDependencyDto[];
 }
@@ -261,6 +272,8 @@ export interface SpecialRequestTypeDto {
   onlyProcesses: string[];
   ignoresDependencies: boolean;
   isActive: boolean;
+  createdAt: string;
+  updatedAt: string | null;
 }
 
 // ─── Dashboard ──────────────────────────────────────────

@@ -56,6 +56,13 @@ export interface UpdateShiftRequest {
 
 // ─── Orders ──────────────────────────────────────────────
 
+export interface CreateOrderItemInput {
+  productCategoryId: string;
+  productName: string;
+  quantity: number;
+  notes?: string;
+}
+
 export interface CreateOrderRequest {
   tenantId: string;
   orderNumber: string;
@@ -63,12 +70,20 @@ export interface CreateOrderRequest {
   priority: number;
   orderType: OrderType;
   notes?: string;
+  customWarningDays?: number;
+  customCriticalDays?: number;
+  items?: CreateOrderItemInput[];
 }
 
 export interface UpdateOrderRequest {
   notes?: string;
   customWarningDays?: number;
   customCriticalDays?: number;
+  addItems?: CreateOrderItemInput[];
+  removeItemIds?: string[];
+  complexityOverrides?: { itemId: string; processId: string; complexity: ComplexityType }[];
+  addSpecialRequests?: { itemId: string; specialRequestTypeId: string }[];
+  removeSpecialRequests?: { itemId: string; specialRequestId: string }[];
 }
 
 export interface AddOrderItemRequest {
@@ -179,11 +194,14 @@ export interface CreateProcessRequest {
   code: string;
   name: string;
   sequenceOrder: number;
+  subProcesses?: { name: string; sequenceOrder: number }[];
 }
 
 export interface UpdateProcessRequest {
   name: string;
   sequenceOrder: number;
+  addSubProcesses?: { name: string; sequenceOrder: number }[];
+  deactivateSubProcessIds?: string[];
 }
 
 export interface AddSubProcessRequest {
@@ -198,17 +216,33 @@ export interface UpdateSubProcessRequest {
 
 // ─── Product Categories ──────────────────────────────────
 
+export interface CategoryProcessInput {
+  processId: string;
+  sequenceOrder: number;
+  defaultComplexity?: ComplexityType;
+}
+
+export interface CategoryDependencyInput {
+  processId: string;
+  dependsOnProcessId: string;
+}
+
 export interface CreateProductCategoryRequest {
   tenantId: string;
   name: string;
   description?: string;
+  processes?: CategoryProcessInput[];
+  dependencies?: CategoryDependencyInput[];
 }
 
 export interface UpdateProductCategoryRequest {
   name: string;
   description?: string;
+  processes?: CategoryProcessInput[];
+  dependencies?: CategoryDependencyInput[];
 }
 
+// Keep for backward compat with existing separate endpoints
 export interface AddCategoryProcessRequest {
   processId: string;
   sequenceOrder: number;
@@ -245,11 +279,19 @@ export interface UpdateSpecialRequestTypeRequest {
 export interface CreateTenantRequest {
   name: string;
   code: string;
+  defaultWarningDays?: number;
+  defaultCriticalDays?: number;
+  warningColor?: string;
+  criticalColor?: string;
 }
 
 export interface UpdateTenantRequest {
   name: string;
   isActive: boolean;
+  defaultWarningDays?: number;
+  defaultCriticalDays?: number;
+  warningColor?: string;
+  criticalColor?: string;
 }
 
 export interface UpdateTenantSettingsRequest {

@@ -3,8 +3,8 @@ import type { CreateUserRequest, UpdateUserRequest, ChangePasswordRequest } from
 import { apiClient } from '../axios-instance';
 
 export const usersApi = {
-  getAll(tenantId: string) {
-    return apiClient.get<PagedResult<UserDto>>('/users', { params: { tenantId } });
+  getAll(params: { tenantId: string; role?: string; isActive?: boolean; search?: string; page?: number; pageSize?: number; createdFrom?: string; createdTo?: string }) {
+    return apiClient.get<PagedResult<UserDto>>('/users', { params });
   },
 
   getById(id: string) {

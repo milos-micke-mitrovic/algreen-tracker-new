@@ -24,6 +24,9 @@ interface AttachmentViewerProps {
 export function AttachmentViewer({ orderId }: AttachmentViewerProps) {
   const [expanded, setExpanded] = useState(false);
   const [viewingAttachment, setViewingAttachment] = useState<OrderAttachmentDto | null>(null);
+  const [viewingPdf, setViewingPdf] = useState<OrderAttachmentDto | null>(null);
+  const [pdfBlobUrl, setPdfBlobUrl] = useState<string | null>(null);
+  const [pdfLoading, setPdfLoading] = useState(false);
 
   const { data: attachments = [], isLoading } = useQuery({
     queryKey: ['order-attachments', orderId],
@@ -45,12 +48,29 @@ export function AttachmentViewer({ orderId }: AttachmentViewerProps) {
   const getUrl = (a: OrderAttachmentDto) =>
     ordersApi.getAttachmentDownloadUrl(orderId, a.id);
 
-  const handleOpen = (a: OrderAttachmentDto) => {
+  const handleOpen = async (a: OrderAttachmentDto) => {
     if (isPdf(a.contentType)) {
-      window.open(getUrl(a), '_blank');
+      setViewingPdf(a);
+      setPdfLoading(true);
+      try {
+        const resp = await fetch(getUrl(a));
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }));
+        setPdfBlobUrl(url + '#toolbar=0&navpanes=0');
+      } catch {
+        setPdfBlobUrl(null);
+      } finally {
+        setPdfLoading(false);
+      }
     } else {
       setViewingAttachment(a);
     }
+  };
+
+  const closePdf = () => {
+    if (pdfBlobUrl) URL.revokeObjectURL(pdfBlobUrl.split('#')[0]);
+    setPdfBlobUrl(null);
+    setViewingPdf(null);
   };
 
   return (
@@ -112,7 +132,6 @@ export function AttachmentViewer({ orderId }: AttachmentViewerProps) {
           className="fixed inset-0 z-50 bg-black flex flex-col"
           onClick={() => setViewingAttachment(null)}
         >
-          {/* Large close button — easy to tap with gloves */}
           <div className="flex justify-between items-center p-3 bg-black/80">
             <span className="text-white text-tablet-sm truncate max-w-[70%]">
               {viewingAttachment.originalFileName}
@@ -125,7 +144,6 @@ export function AttachmentViewer({ orderId }: AttachmentViewerProps) {
             </button>
           </div>
 
-          {/* Image — takes full remaining space */}
           <div className="flex-1 flex items-center justify-center overflow-auto p-2">
             <img
               src={getUrl(viewingAttachment)}
@@ -135,11 +153,46 @@ export function AttachmentViewer({ orderId }: AttachmentViewerProps) {
             />
           </div>
 
-          {/* Bottom hint */}
           <div className="p-3 text-center bg-black/80">
             <span className="text-gray-400 text-tablet-sm">
               Dodirnite bilo gde za zatvaranje
             </span>
+          </div>
+        </div>
+      )}
+
+      {/* Fullscreen PDF viewer */}
+      {viewingPdf && (
+        <div className="fixed inset-0 z-50 bg-black flex flex-col">
+          <div className="flex justify-between items-center p-3 bg-black/80">
+            <span className="text-white text-tablet-sm truncate max-w-[70%]">
+              {viewingPdf.originalFileName}
+            </span>
+            <button
+              onClick={closePdf}
+              className="text-white bg-red-600 rounded-xl px-5 py-3 text-tablet-base font-bold active:bg-red-700 min-w-[80px]"
+            >
+              Zatvori
+            </button>
+          </div>
+
+          <div className="flex-1 p-2">
+            {pdfLoading ? (
+              <div className="w-full h-full flex items-center justify-center">
+                <span className="text-white text-tablet-base">Učitavanje...</span>
+              </div>
+            ) : pdfBlobUrl ? (
+              <iframe
+                src={pdfBlobUrl}
+                className="w-full h-full rounded-lg"
+                style={{ border: 'none', backgroundColor: '#fff' }}
+                title={viewingPdf.originalFileName}
+              />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center">
+                <span className="text-white text-tablet-base">Greška pri učitavanju</span>
+              </div>
+            )}
           </div>
         </div>
       )}

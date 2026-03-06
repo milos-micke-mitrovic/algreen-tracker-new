@@ -35,8 +35,30 @@ export const ordersApi = {
     return apiClient.get<OrderDetailDto>(`/orders/${id}`);
   },
 
-  create(data: CreateOrderRequest) {
-    return apiClient.post<OrderDetailDto>('/orders', data);
+  create(data: CreateOrderRequest & { attachments?: File[] }) {
+    const formData = new FormData();
+    formData.append('TenantId', data.tenantId);
+    formData.append('OrderNumber', data.orderNumber);
+    formData.append('DeliveryDate', data.deliveryDate);
+    formData.append('Priority', String(data.priority));
+    formData.append('OrderType', data.orderType);
+    if (data.notes) formData.append('Notes', data.notes);
+    if (data.customWarningDays != null) formData.append('CustomWarningDays', String(data.customWarningDays));
+    if (data.customCriticalDays != null) formData.append('CustomCriticalDays', String(data.customCriticalDays));
+    if (data.items) {
+      data.items.forEach((item, i) => {
+        formData.append(`Items[${i}].ProductCategoryId`, item.productCategoryId);
+        formData.append(`Items[${i}].ProductName`, item.productName);
+        formData.append(`Items[${i}].Quantity`, String(item.quantity));
+        if (item.notes) formData.append(`Items[${i}].Notes`, item.notes);
+      });
+    }
+    if (data.attachments) {
+      data.attachments.forEach((file) => formData.append('Attachments', file));
+    }
+    return apiClient.post<OrderDetailDto>('/orders', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
   },
 
   update(id: string, data: UpdateOrderRequest) {

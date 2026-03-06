@@ -1,9 +1,18 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
-  Typography, Table, Button, Drawer, Form, Input, Tag, Space, App,
-  Select, InputNumber, Divider, Popconfirm, Descriptions,
+  Typography, Table, Button, Drawer, Form, Input, Tag, App,
+  Select, InputNumber, Divider, Popconfirm, DatePicker,
 } from 'antd';
-import { PlusOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons';
+
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
+import { PlusOutlined, DeleteOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { productCategoriesApi, processesApi } from '@algreen/api-client';
 import { useAuthStore } from '@algreen/auth';
@@ -14,27 +23,87 @@ import type {
 } from '@algreen/shared-types';
 import { ComplexityType } from '@algreen/shared-types';
 import { useTranslation } from '@algreen/i18n';
+import dayjs from 'dayjs';
 
-const { Title } = Typography;
+const { Title, Text } = Typography;
+
+function getApiErrorCode(error: unknown): string | undefined {
+  return (error as { response?: { data?: { error?: { code?: string } } } })?.response?.data?.error?.code;
+}
+
+function getTranslatedError(error: unknown, t: (key: string, opts?: Record<string, string>) => string, fallback: string): string {
+  const resp = (error as { response?: { data?: { error?: { code?: string; message?: string } } } })?.response?.data?.error;
+  if (resp?.code) {
+    const translated = t(`common:errors.${resp.code}`, { defaultValue: '' });
+    if (translated) return translated;
+  }
+  return resp?.message || fallback;
+}
+
+interface LocalProcess { processId: string; sequenceOrder: number; defaultComplexity?: ComplexityType }
+interface LocalDep { processId: string; dependsOnProcessId: string }
 
 export function ProductCategoriesPage() {
   const tenantId = useAuthStore((s) => s.tenantId);
   const queryClient = useQueryClient();
-  const [createOpen, setCreateOpen] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
-  const [editing, setEditing] = useState(false);
-  const [createForm] = Form.useForm();
-  const [editForm] = Form.useForm();
-  const [addProcessForm] = Form.useForm();
-  const [addDepForm] = Form.useForm();
+  const [form] = Form.useForm();
   const { message } = App.useApp();
   const { t } = useTranslation('dashboard');
 
-  // ─── Queries ──────────────────────────────────────────
+  // ─── Filter & Pagination State ──────────────────────────
+  const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 400);
+  const [isActiveFilter, setIsActiveFilter] = useState<boolean | undefined>(undefined);
+  const [dateFrom, setDateFrom] = useState<dayjs.Dayjs | null>(null);
+  const [dateTo, setDateTo] = useState<dayjs.Dayjs | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
 
-  const { data: categories, isLoading } = useQuery({
-    queryKey: ['product-categories', tenantId],
-    queryFn: () => productCategoriesApi.getAll(tenantId!).then((r) => r.data.items),
+  useEffect(() => { setPage(1); }, [debouncedSearch, isActiveFilter, dateFrom, dateTo]);
+
+  // ─── Local state for processes & dependencies ─────────────
+  const [localProcesses, setLocalProcesses] = useState<LocalProcess[]>([]);
+  const [localDeps, setLocalDeps] = useState<LocalDep[]>([]);
+
+  // ─── Inline add state ─────────────────────────────────────
+  const [addProcId, setAddProcId] = useState<string | undefined>(undefined);
+  const [addProcOrder, setAddProcOrder] = useState<number | undefined>(undefined);
+  const [addProcComplexity, setAddProcComplexity] = useState<ComplexityType | undefined>(undefined);
+  const [addDepProcId, setAddDepProcId] = useState<string | undefined>(undefined);
+  const [addDepDependsOn, setAddDepDependsOn] = useState<string | undefined>(undefined);
+
+  const resetAddProcess = useCallback(() => {
+    setAddProcId(undefined);
+    setAddProcOrder(undefined);
+    setAddProcComplexity(undefined);
+  }, []);
+
+  const resetAddDep = useCallback(() => {
+    setAddDepProcId(undefined);
+    setAddDepDependsOn(undefined);
+  }, []);
+
+  const clearLocal = useCallback(() => {
+    setLocalProcesses([]);
+    setLocalDeps([]);
+    resetAddProcess();
+    resetAddDep();
+  }, [resetAddProcess, resetAddDep]);
+
+  // ─── Queries ──────────────────────────────────────────
+  const { data: pagedResult, isLoading } = useQuery({
+    queryKey: ['product-categories', tenantId, debouncedSearch, isActiveFilter, dateFrom?.format('YYYY-MM-DD'), dateTo?.format('YYYY-MM-DD'), page, pageSize],
+    queryFn: () => productCategoriesApi.getAll({
+      tenantId: tenantId!,
+      search: debouncedSearch || undefined,
+      isActive: isActiveFilter,
+      createdFrom: dateFrom?.format('YYYY-MM-DD'),
+      createdTo: dateTo?.format('YYYY-MM-DD'),
+      page,
+      pageSize,
+    }).then((r) => r.data),
     enabled: !!tenantId,
   });
 
@@ -46,36 +115,66 @@ export function ProductCategoriesPage() {
 
   const { data: processes } = useQuery({
     queryKey: ['processes', tenantId],
-    queryFn: () => processesApi.getAll(tenantId!).then((r) => r.data.items),
+    queryFn: () => processesApi.getAll({ tenantId: tenantId!, pageSize: 100 }).then((r) => r.data.items),
     enabled: !!tenantId,
   });
 
-  // ─── Mutations ────────────────────────────────────────
+  const processLookup = new Map((processes ?? []).map((p) => [p.id, p]));
 
+  // ─── Seed local state from detail when editing ─────────────
+  useEffect(() => {
+    if (detail) {
+      form.setFieldsValue({ name: detail.name, description: detail.description });
+      setLocalProcesses(detail.processes.map((p) => ({
+        processId: p.processId,
+        sequenceOrder: p.sequenceOrder,
+        defaultComplexity: p.defaultComplexity ?? undefined,
+      })));
+      setLocalDeps(detail.dependencies.map((d) => ({
+        processId: d.processId,
+        dependsOnProcessId: d.dependsOnProcessId,
+      })));
+    }
+  }, [detail, form]);
+
+  // ─── Mutations ────────────────────────────────────────
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['product-categories'] });
   };
 
   const createMutation = useMutation({
     mutationFn: (values: { name: string; description?: string }) =>
-      productCategoriesApi.create({ tenantId: tenantId!, ...values }),
+      productCategoriesApi.create({
+        tenantId: tenantId!,
+        name: values.name,
+        description: values.description,
+        processes: localProcesses,
+        dependencies: localDeps,
+      }),
     onSuccess: (resp) => {
       invalidate();
-      setCreateOpen(false);
-      createForm.resetFields();
+      setIsCreating(false);
+      form.resetFields();
+      clearLocal();
       message.success(t('admin.productCategories.created'));
-      setDetailId(resp.data.id);
+      if (resp.data?.id) setDetailId(resp.data.id);
     },
+    onError: (err) => message.error(getTranslatedError(err, t, t('admin.productCategories.createFailed'))),
   });
 
   const updateMutation = useMutation({
     mutationFn: (values: { name: string; description?: string }) =>
-      productCategoriesApi.update(detailId!, values),
+      productCategoriesApi.update(detailId!, {
+        name: values.name,
+        description: values.description,
+        processes: localProcesses,
+        dependencies: localDeps,
+      }),
     onSuccess: () => {
       invalidate();
-      setEditing(false);
       message.success(t('admin.productCategories.updated'));
     },
+    onError: (err) => message.error(getTranslatedError(err, t, t('admin.productCategories.updateFailed'))),
   });
 
   const deactivateMutation = useMutation({
@@ -85,80 +184,75 @@ export function ProductCategoriesPage() {
       setDetailId(null);
       message.success(t('admin.productCategories.deactivated'));
     },
+    onError: (err) => message.error(getTranslatedError(err, t, t('admin.productCategories.deactivateFailed'))),
   });
 
-  const addProcessMutation = useMutation({
-    mutationFn: (values: { processId: string; sequenceOrder: number; defaultComplexity?: ComplexityType }) =>
-      productCategoriesApi.addProcess(detailId!, values),
+  const activateMutation = useMutation({
+    mutationFn: () => productCategoriesApi.activate(detailId!),
     onSuccess: () => {
       invalidate();
-      addProcessForm.resetFields();
-      message.success(t('admin.productCategories.processAdded'));
+      setDetailId(null);
+      message.success(t('admin.productCategories.activated'));
     },
+    onError: (err) => message.error(getTranslatedError(err, t, t('admin.productCategories.activateFailed'))),
   });
 
-  const removeProcessMutation = useMutation({
-    mutationFn: (processId: string) =>
-      productCategoriesApi.removeProcess(detailId!, processId),
-    onSuccess: () => {
-      invalidate();
-      message.success(t('admin.productCategories.processRemoved'));
-    },
-  });
-
-  const addDepMutation = useMutation({
-    mutationFn: (values: { processId: string; dependsOnProcessId: string }) =>
-      productCategoriesApi.addDependency(detailId!, values),
-    onSuccess: () => {
-      invalidate();
-      addDepForm.resetFields();
-      message.success(t('admin.productCategories.dependencyAdded'));
-    },
-  });
-
-  const removeDepMutation = useMutation({
-    mutationFn: (dependencyId: string) =>
-      productCategoriesApi.removeDependency(detailId!, dependencyId),
-    onSuccess: () => {
-      invalidate();
-      message.success(t('admin.productCategories.dependencyRemoved'));
-    },
-  });
-
-  // ─── Helpers ──────────────────────────────────────────
-
-  const openDetail = (id: string) => {
-    setDetailId(id);
-    setEditing(false);
-  };
-
-  const closeDetail = () => {
-    setDetailId(null);
-    setEditing(false);
-    editForm.resetFields();
-    addProcessForm.resetFields();
-    addDepForm.resetFields();
-  };
-
-  const startEditing = () => {
-    if (detail) {
-      editForm.setFieldsValue({ name: detail.name, description: detail.description });
-    }
-    setEditing(true);
-  };
-
-  // Processes already assigned to this category
-  const assignedProcessIds = new Set(detail?.processes.map((p) => p.processId) ?? []);
-  // Available processes not yet assigned
+  // ─── Derived data ──────────────────────────────────────
+  const assignedProcessIds = new Set(localProcesses.map((p) => p.processId));
   const availableProcesses = (processes ?? []).filter((p) => !assignedProcessIds.has(p.id) && p.isActive);
-  // For dependencies: only processes already in the category
-  const categoryProcessOptions = (detail?.processes ?? []).map((p) => ({
-    value: p.processId,
-    label: `${p.processCode} — ${p.processName}`,
-  }));
+
+  const categoryProcessOptions = localProcesses.map((p) => {
+    const proc = processLookup.get(p.processId);
+    return { value: p.processId, label: proc ? `${proc.code} — ${proc.name}` : p.processId };
+  });
+
+  const displayProcesses: ProductCategoryProcessDto[] = localProcesses.map((p, i) => {
+    const proc = processLookup.get(p.processId);
+    return {
+      id: `local-${i}`,
+      processId: p.processId,
+      processCode: proc?.code ?? '?',
+      processName: proc?.name ?? '?',
+      sequenceOrder: p.sequenceOrder,
+      defaultComplexity: p.defaultComplexity ?? null,
+    } as ProductCategoryProcessDto;
+  });
+
+  const displayDeps: ProductCategoryDependencyDto[] = localDeps.map((d, i) => {
+    const proc = processLookup.get(d.processId);
+    const dep = processLookup.get(d.dependsOnProcessId);
+    return {
+      id: `local-dep-${i}`,
+      processId: d.processId,
+      processCode: proc?.code ?? '?',
+      dependsOnProcessId: d.dependsOnProcessId,
+      dependsOnProcessCode: dep?.code ?? '?',
+    } as ProductCategoryDependencyDto;
+  });
+
+  // ─── Inline add/remove handlers ────────────────────────────
+  const handleAddProcess = () => {
+    if (!addProcId || !addProcOrder) return;
+    setLocalProcesses((prev) => [...prev, { processId: addProcId, sequenceOrder: addProcOrder, defaultComplexity: addProcComplexity }]);
+    resetAddProcess();
+  };
+
+  const handleRemoveProcess = (processId: string) => {
+    setLocalProcesses((prev) => prev.filter((p) => p.processId !== processId));
+    setLocalDeps((prev) => prev.filter((d) => d.processId !== processId && d.dependsOnProcessId !== processId));
+  };
+
+  const handleAddDep = () => {
+    if (!addDepProcId || !addDepDependsOn || addDepProcId === addDepDependsOn) return;
+    setLocalDeps((prev) => [...prev, { processId: addDepProcId, dependsOnProcessId: addDepDependsOn }]);
+    resetAddDep();
+  };
+
+  const handleRemoveDep = (index: number) => {
+    setLocalDeps((prev) => prev.filter((_, i) => i !== index));
+  };
 
   // ─── List columns ─────────────────────────────────────
-
   const columns = [
     {
       title: t('common:labels.name'),
@@ -167,14 +261,16 @@ export function ProductCategoriesPage() {
     },
     { title: t('common:labels.description'), dataIndex: 'description', ellipsis: true },
     {
+      title: t('common:labels.created'),
+      dataIndex: 'createdAt',
+      width: 150,
+      render: (d: string) => d ? dayjs(d).format('DD.MM.YYYY.') : '—',
+      sorter: (a: ProductCategoryDto, b: ProductCategoryDto) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''),
+    },
+    {
       title: t('common:labels.status'),
       dataIndex: 'isActive',
       width: 100,
-      filters: [
-        { text: t('common:status.active'), value: true },
-        { text: t('common:status.inactive'), value: false },
-      ],
-      onFilter: (value: boolean | React.Key, record: ProductCategoryDto) => record.isActive === value,
       render: (active: boolean) => (
         <Tag color={active ? 'green' : 'default'}>
           {active ? t('common:status.active') : t('common:status.inactive')}
@@ -183,275 +279,246 @@ export function ProductCategoriesPage() {
     },
   ];
 
-  // ─── Render ───────────────────────────────────────────
+  // ─── Drawer ─────────────────────────────────────────────
+  const drawerOpen = isCreating || !!detailId;
+  const isSaving = createMutation.isPending || updateMutation.isPending;
 
+  const closeDrawer = () => {
+    form.resetFields();
+    clearLocal();
+    if (isCreating) setIsCreating(false);
+    else setDetailId(null);
+  };
+
+  const processesSection = (
+    <>
+      <Divider />
+      <Title level={5} style={{ marginBottom: 12 }}>
+        {t('admin.productCategories.processes', { count: displayProcesses.length })}
+      </Title>
+      <Table<ProductCategoryProcessDto>
+        dataSource={displayProcesses}
+        rowKey="id"
+        size="small"
+        pagination={false}
+        columns={[
+          { title: t('common:labels.process'), render: (_, r) => `${r.processCode} — ${r.processName}` },
+          { title: t('common:labels.order'), dataIndex: 'sequenceOrder', width: 80, align: 'center' },
+          {
+            title: t('admin.productCategories.defaultComplexity'),
+            dataIndex: 'defaultComplexity',
+            width: 120,
+            render: (v: ComplexityType | null) => v ? <Tag>{t(`common:enums.ComplexityType.${v}`)}</Tag> : '—',
+          },
+          {
+            title: '', width: 50,
+            render: (_, r) => (
+              <Button type="text" danger icon={<DeleteOutlined />} size="small" onClick={() => handleRemoveProcess(r.processId)} />
+            ),
+          },
+        ]}
+      />
+      {availableProcesses.length > 0 && (
+        <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+          <Select
+            placeholder={t('admin.productCategories.selectProcess')}
+            value={addProcId}
+            onChange={setAddProcId}
+            style={{ minWidth: 200 }}
+            options={availableProcesses.map((p) => ({ value: p.id, label: `${p.code} — ${p.name}` }))}
+          />
+          <InputNumber
+            min={1} precision={0}
+            placeholder={t('common:labels.order')}
+            value={addProcOrder}
+            onChange={(v) => setAddProcOrder(v ?? undefined)}
+            style={{ width: 80 }}
+          />
+          <Select
+            placeholder={t('common:labels.complexity')}
+            allowClear
+            value={addProcComplexity}
+            onChange={setAddProcComplexity}
+            style={{ width: 110 }}
+            options={Object.values(ComplexityType).map((c) => ({ value: c, label: t(`common:enums.ComplexityType.${c}`) }))}
+          />
+          <Button type="dashed" icon={<PlusOutlined />} onClick={handleAddProcess} disabled={!addProcId || !addProcOrder}>
+            {t('common:actions.add')}
+          </Button>
+        </div>
+      )}
+    </>
+  );
+
+  const dependenciesSection = (
+    <>
+      <Divider />
+      <Title level={5} style={{ marginBottom: 12 }}>
+        {t('admin.productCategories.dependencies', { count: displayDeps.length })}
+      </Title>
+      <Table<ProductCategoryDependencyDto>
+        dataSource={displayDeps}
+        rowKey="id"
+        size="small"
+        pagination={false}
+        columns={[
+          { title: t('common:labels.process'), dataIndex: 'processCode', width: 120 },
+          { title: t('admin.productCategories.dependsOn'), dataIndex: 'dependsOnProcessCode' },
+          {
+            title: '', width: 50,
+            render: (_, _r, index) => (
+              <Button type="text" danger icon={<DeleteOutlined />} size="small" onClick={() => handleRemoveDep(index)} />
+            ),
+          },
+        ]}
+      />
+      {categoryProcessOptions.length >= 2 && (
+        <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+          <Select
+            placeholder={t('common:labels.process')}
+            value={addDepProcId}
+            onChange={(v) => { setAddDepProcId(v); if (v === addDepDependsOn) setAddDepDependsOn(undefined); }}
+            style={{ minWidth: 180 }}
+            options={categoryProcessOptions}
+          />
+          <Select
+            placeholder={t('admin.productCategories.dependsOn')}
+            value={addDepDependsOn}
+            onChange={setAddDepDependsOn}
+            style={{ minWidth: 180 }}
+            options={categoryProcessOptions.filter((o) => o.value !== addDepProcId)}
+          />
+          <Button
+            type="dashed" icon={<PlusOutlined />} onClick={handleAddDep}
+            disabled={!addDepProcId || !addDepDependsOn || addDepProcId === addDepDependsOn}
+          >
+            {t('common:actions.add')}
+          </Button>
+        </div>
+      )}
+    </>
+  );
+
+  // ─── Render ───────────────────────────────────────────
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>{t('admin.productCategories.title')}</Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); clearLocal(); setIsCreating(true); }}>
           {t('admin.productCategories.addCategory')}
         </Button>
       </div>
 
+      <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+        <Input.Search
+          placeholder={t('common:actions.search')}
+          allowClear
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ width: 260 }}
+        />
+        <Select
+          placeholder={t('common:labels.status')}
+          allowClear
+          value={isActiveFilter}
+          onChange={(v) => setIsActiveFilter(v)}
+          style={{ width: 150 }}
+          options={[
+            { label: t('common:status.active'), value: true },
+            { label: t('common:status.inactive'), value: false },
+          ]}
+        />
+        <DatePicker
+          value={dateFrom}
+          onChange={setDateFrom}
+          format="DD.MM.YYYY"
+          allowClear
+          placeholder={t('common:labels.dateFrom')}
+        />
+        <DatePicker
+          value={dateTo}
+          onChange={setDateTo}
+          format="DD.MM.YYYY"
+          allowClear
+          placeholder={t('common:labels.dateTo')}
+        />
+      </div>
+
       <Table
         columns={columns}
-        dataSource={categories}
+        dataSource={pagedResult?.items}
         rowKey="id"
         loading={isLoading}
         scroll={{ x: 'max-content' }}
-        onRow={(record) => ({ onClick: () => openDetail(record.id), style: { cursor: 'pointer' } })}
+        pagination={{
+          current: page,
+          pageSize,
+          total: pagedResult?.totalCount,
+          onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+          showSizeChanger: true,
+        }}
+        onRow={(record) => ({ onClick: () => setDetailId(record.id), style: { cursor: 'pointer' } })}
       />
 
-      {/* Create drawer */}
       <Drawer
-        title={t('admin.productCategories.createCategory')}
-        open={createOpen}
-        onClose={() => { createForm.resetFields(); setCreateOpen(false); }}
-        width={400}
-        extra={
-          <Button type="primary" onClick={() => createForm.submit()} loading={createMutation.isPending}>{t('common:actions.save')}</Button>
-        }
-      >
-        <Form form={createForm} layout="vertical" onFinish={(v) => createMutation.mutate(v)}>
-          <Form.Item name="name" label={t('common:labels.name')} rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="description" label={t('common:labels.description')}>
-            <Input.TextArea rows={2} />
-          </Form.Item>
-        </Form>
-      </Drawer>
-
-      {/* Detail / Configure drawer */}
-      <Drawer
-        title={detail?.name ?? ''}
-        open={!!detailId}
-        onClose={closeDetail}
+        title={isCreating ? t('admin.productCategories.createCategory') : (detail?.name ?? '')}
+        open={drawerOpen}
+        onClose={closeDrawer}
+        afterOpenChange={(open) => { if (!open) form.resetFields(); }}
         width={640}
-        loading={detailLoading}
+        loading={!isCreating && detailLoading}
         extra={
-          detail && (
-            <Space>
-              {editing ? (
-                <>
-                  <Button onClick={() => setEditing(false)}>{t('common:actions.cancel')}</Button>
-                  <Button type="primary" onClick={() => editForm.submit()} loading={updateMutation.isPending}>
-                    {t('common:actions.save')}
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <Button icon={<EditOutlined />} onClick={startEditing}>
-                    {t('common:actions.edit')}
-                  </Button>
-                  <Popconfirm
-                    title={t('admin.productCategories.deactivateConfirm')}
-                    onConfirm={() => deactivateMutation.mutate()}
-                    okText={t('common:actions.confirm')}
-                    cancelText={t('common:actions.no')}
-                  >
-                    <Button danger icon={<DeleteOutlined />} loading={deactivateMutation.isPending}>
-                      {t('admin.productCategories.deactivate')}
-                    </Button>
-                  </Popconfirm>
-                </>
-              )}
-            </Space>
-          )
+          <div style={{ display: 'flex', gap: 8 }}>
+            {!isCreating && detail?.isActive && (
+              <Popconfirm
+                title={t('admin.productCategories.deactivateConfirm')}
+                onConfirm={() => deactivateMutation.mutate()}
+                okText={t('common:actions.confirm')}
+                cancelText={t('common:actions.no')}
+              >
+                <Button danger loading={deactivateMutation.isPending}>
+                  {t('admin.productCategories.deactivate')}
+                </Button>
+              </Popconfirm>
+            )}
+            {!isCreating && detail && !detail.isActive && (
+              <Popconfirm
+                title={t('admin.productCategories.activateConfirm')}
+                onConfirm={() => activateMutation.mutate()}
+                okText={t('common:actions.confirm')}
+                cancelText={t('common:actions.no')}
+              >
+                <Button type="primary" ghost loading={activateMutation.isPending}>
+                  {t('admin.productCategories.activate')}
+                </Button>
+              </Popconfirm>
+            )}
+            <Button type="primary" onClick={() => form.submit()} loading={isSaving}>
+              {t('common:actions.save')}
+            </Button>
+          </div>
         }
       >
-        {detail && (
+        {(isCreating || detail) && (
           <>
-            {/* Info section */}
-            {editing ? (
-              <Form
-                form={editForm}
-                layout="vertical"
-                onFinish={(v) => updateMutation.mutate(v)}
-              >
-                <Form.Item name="name" label={t('common:labels.name')} rules={[{ required: true }]}>
-                  <Input />
-                </Form.Item>
-                <Form.Item name="description" label={t('common:labels.description')}>
-                  <Input.TextArea rows={2} />
-                </Form.Item>
-              </Form>
-            ) : (
-              <Descriptions column={1} size="small" bordered>
-                <Descriptions.Item label={t('common:labels.description')}>
-                  {detail.description || '—'}
-                </Descriptions.Item>
-                <Descriptions.Item label={t('common:labels.status')}>
-                  <Tag color={detail.isActive ? 'green' : 'default'}>
-                    {detail.isActive ? t('common:status.active') : t('common:status.inactive')}
-                  </Tag>
-                </Descriptions.Item>
-              </Descriptions>
-            )}
-
-            {/* Processes section */}
-            <Divider />
-            <Title level={5} style={{ marginBottom: 12 }}>
-              {t('admin.productCategories.processes', { count: detail.processes.length })}
-            </Title>
-            <Table<ProductCategoryProcessDto>
-              dataSource={detail.processes}
-              rowKey="id"
-              size="small"
-              pagination={false}
-              columns={[
-                {
-                  title: t('common:labels.process'),
-                  render: (_, r) => `${r.processCode} — ${r.processName}`,
-                },
-                { title: t('common:labels.order'), dataIndex: 'sequenceOrder', width: 80, align: 'center' },
-                {
-                  title: t('admin.productCategories.defaultComplexity'),
-                  dataIndex: 'defaultComplexity',
-                  width: 120,
-                  render: (v: ComplexityType | null) =>
-                    v ? <Tag>{t(`common:enums.ComplexityType.${v}`)}</Tag> : '—',
-                },
-                {
-                  title: '',
-                  width: 50,
-                  render: (_, r) => (
-                    <Popconfirm
-                      title={t('admin.productCategories.removeProcessConfirm')}
-                      onConfirm={() => removeProcessMutation.mutate(r.processId)}
-                      okText={t('common:actions.confirm')}
-                      cancelText={t('common:actions.no')}
-                    >
-                      <Button type="text" danger icon={<DeleteOutlined />} size="small" />
-                    </Popconfirm>
-                  ),
-                },
-              ]}
-            />
-
-            {availableProcesses.length > 0 && (
-              <Form
-                form={addProcessForm}
-                layout="inline"
-                style={{ marginTop: 12 }}
-                onFinish={(v) => addProcessMutation.mutate(v)}
-              >
-                <Form.Item name="processId" rules={[{ required: true }]} style={{ minWidth: 200 }}>
-                  <Select
-                    placeholder={t('admin.productCategories.selectProcess')}
-                    options={availableProcesses.map((p) => ({
-                      value: p.id,
-                      label: `${p.code} — ${p.name}`,
-                    }))}
-                  />
-                </Form.Item>
-                <Form.Item name="sequenceOrder" rules={[{ required: true }]} initialValue={detail.processes.length + 1}>
-                  <InputNumber min={1} placeholder={t('common:labels.order')} style={{ width: 80 }} />
-                </Form.Item>
-                <Form.Item name="defaultComplexity">
-                  <Select
-                    placeholder={t('common:labels.complexity')}
-                    allowClear
-                    style={{ width: 110 }}
-                    options={Object.values(ComplexityType).map((c) => ({
-                      value: c,
-                      label: t(`common:enums.ComplexityType.${c}`),
-                    }))}
-                  />
-                </Form.Item>
-                <Form.Item>
-                  <Button
-                    type="dashed"
-                    icon={<PlusOutlined />}
-                    htmlType="submit"
-                    loading={addProcessMutation.isPending}
-                  >
-                    {t('common:actions.add')}
-                  </Button>
-                </Form.Item>
-              </Form>
-            )}
-
-            {/* Dependencies section */}
-            <Divider />
-            <Title level={5} style={{ marginBottom: 12 }}>
-              {t('admin.productCategories.dependencies', { count: detail.dependencies.length })}
-            </Title>
-            <Table<ProductCategoryDependencyDto>
-              dataSource={detail.dependencies}
-              rowKey="id"
-              size="small"
-              pagination={false}
-              columns={[
-                { title: t('common:labels.process'), dataIndex: 'processCode', width: 120 },
-                { title: t('admin.productCategories.dependsOn'), dataIndex: 'dependsOnProcessCode' },
-                {
-                  title: '',
-                  width: 50,
-                  render: (_, r) => (
-                    <Popconfirm
-                      title={t('admin.productCategories.removeDependencyConfirm')}
-                      onConfirm={() => removeDepMutation.mutate(r.id)}
-                      okText={t('common:actions.confirm')}
-                      cancelText={t('common:actions.no')}
-                    >
-                      <Button type="text" danger icon={<DeleteOutlined />} size="small" />
-                    </Popconfirm>
-                  ),
-                },
-              ]}
-            />
-
-            {categoryProcessOptions.length >= 2 && (
-              <Form
-                form={addDepForm}
-                layout="inline"
-                style={{ marginTop: 12 }}
-                onFinish={(v) => addDepMutation.mutate(v)}
-              >
-                <Form.Item
-                  name="processId"
-                  rules={[{ required: true }]}
-                  style={{ minWidth: 180 }}
-                >
-                  <Select
-                    placeholder={t('common:labels.process')}
-                    options={categoryProcessOptions}
-                    onChange={() => addDepForm.validateFields(['dependsOnProcessId']).catch(() => {})}
-                  />
-                </Form.Item>
-                <Form.Item
-                  name="dependsOnProcessId"
-                  rules={[
-                    { required: true },
-                    {
-                      validator: (_, value) => {
-                        if (value && value === addDepForm.getFieldValue('processId')) {
-                          return Promise.reject(t('admin.productCategories.sameProcessError'));
-                        }
-                        return Promise.resolve();
-                      },
-                    },
-                  ]}
-                  style={{ minWidth: 180 }}
-                >
-                  <Select
-                    placeholder={t('admin.productCategories.dependsOn')}
-                    options={categoryProcessOptions}
-                  />
-                </Form.Item>
-                <Form.Item>
-                  <Button
-                    type="dashed"
-                    icon={<PlusOutlined />}
-                    htmlType="submit"
-                    loading={addDepMutation.isPending}
-                  >
-                    {t('common:actions.add')}
-                  </Button>
-                </Form.Item>
-              </Form>
+            <Form
+              form={form}
+              layout="vertical"
+              onFinish={(v) => isCreating ? createMutation.mutate(v) : updateMutation.mutate(v)}
+            >
+              <Form.Item name="name" label={t('common:labels.name')} rules={[{ required: true }]}>
+                <Input />
+              </Form.Item>
+              <Form.Item name="description" label={t('common:labels.description')}>
+                <Input.TextArea rows={2} />
+              </Form.Item>
+            </Form>
+            {processesSection}
+            {dependenciesSection}
+            {!isCreating && detail?.updatedAt && (
+              <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 12 }}>
+                {t('common:labels.updated')}: {dayjs(detail.updatedAt).format('DD.MM.YYYY.')}
+              </Text>
             )}
           </>
         )}

@@ -59,7 +59,7 @@ export function usePendingChangeRequests() {
     queryKey: ['dashboard', 'pending-change-requests', tenantId],
     queryFn: () =>
       changeRequestsApi
-        .getAll(tenantId!, RequestStatus.Pending)
+        .getAll({ tenantId: tenantId!, status: RequestStatus.Pending })
         .then((r) => r.data.items),
     enabled: !!tenantId,
     refetchInterval: 120_000,

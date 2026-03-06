@@ -45,7 +45,7 @@ export function IncomingOrdersPage() {
 
   const { data: processes } = useQuery({
     queryKey: ['processes', tenantId],
-    queryFn: () => processesApi.getAll(tenantId!).then((r) => r.data.items),
+    queryFn: () => processesApi.getAll({ tenantId: tenantId!, pageSize: 100 }).then((r) => r.data.items),
     enabled: !!tenantId,
     staleTime: 5 * 60_000,
   });

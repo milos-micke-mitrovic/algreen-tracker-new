@@ -1,11 +1,21 @@
-import { useState, useMemo } from 'react';
-import { Typography, Table, Button, Drawer, Form, Input, Select, Tag, Space, App, Popconfirm, Divider } from 'antd';
+import { useState, useEffect, useMemo } from 'react';
+import { Typography, Table, Button, Drawer, Form, Input, Select, Tag, Space, App, Popconfirm, Divider, DatePicker } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
+
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { specialRequestTypesApi, processesApi } from '@algreen/api-client';
 import { useAuthStore } from '@algreen/auth';
 import type { SpecialRequestTypeDto, ProcessDto } from '@algreen/shared-types';
 import { useTranslation } from '@algreen/i18n';
+import dayjs from 'dayjs';
 
 const { Title, Text } = Typography;
 
@@ -14,12 +24,12 @@ function getApiErrorCode(error: unknown): string | undefined {
 }
 
 function getTranslatedError(error: unknown, t: (key: string, opts?: Record<string, string>) => string, fallback: string): string {
-  const code = getApiErrorCode(error);
-  if (code) {
-    const translated = t(`common:errors.${code}`, { defaultValue: '' });
+  const resp = (error as { response?: { data?: { error?: { code?: string; message?: string } } } })?.response?.data?.error;
+  if (resp?.code) {
+    const translated = t(`common:errors.${resp.code}`, { defaultValue: '' });
     if (translated) return translated;
   }
-  return fallback;
+  return resp?.message || fallback;
 }
 
 export function SpecialRequestTypesPage() {
@@ -27,21 +37,40 @@ export function SpecialRequestTypesPage() {
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
   const [detailItem, setDetailItem] = useState<SpecialRequestTypeDto | null>(null);
-  const [editing, setEditing] = useState(false);
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
   const { message } = App.useApp();
   const { t } = useTranslation('dashboard');
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['special-request-types', tenantId],
-    queryFn: () => specialRequestTypesApi.getAll(tenantId!).then((r) => r.data.items),
+  const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 400);
+  const [isActiveFilter, setIsActiveFilter] = useState<boolean | undefined>(undefined);
+  const [dateFrom, setDateFrom] = useState<dayjs.Dayjs | null>(null);
+  const [dateTo, setDateTo] = useState<dayjs.Dayjs | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+
+  useEffect(() => { setPage(1); }, [debouncedSearch, isActiveFilter, dateFrom, dateTo]);
+
+  const { data: pagedResult, isLoading } = useQuery({
+    queryKey: ['special-request-types', tenantId, debouncedSearch, isActiveFilter, dateFrom?.format('YYYY-MM-DD'), dateTo?.format('YYYY-MM-DD'), page, pageSize],
+    queryFn: () => specialRequestTypesApi.getAll({
+      tenantId: tenantId!,
+      search: debouncedSearch || undefined,
+      isActive: isActiveFilter,
+      createdFrom: dateFrom?.format('YYYY-MM-DD'),
+      createdTo: dateTo?.format('YYYY-MM-DD'),
+      page,
+      pageSize,
+    }).then((r) => r.data),
     enabled: !!tenantId,
   });
 
+  const data = pagedResult?.items;
+
   const { data: processes } = useQuery({
     queryKey: ['processes', tenantId],
-    queryFn: () => processesApi.getAll(tenantId!).then((r) => r.data.items),
+    queryFn: () => processesApi.getAll({ tenantId: tenantId!, pageSize: 100 }).then((r) => r.data.items),
     enabled: !!tenantId && (!!detailItem || createOpen),
   });
 
@@ -67,11 +96,14 @@ export function SpecialRequestTypesPage() {
         removesProcesses: values.removesProcesses as string[] | undefined,
         onlyProcesses: values.onlyProcesses as string[] | undefined,
       }),
-    onSuccess: () => {
+    onSuccess: (resp) => {
       queryClient.invalidateQueries({ queryKey: ['special-request-types'] });
       setCreateOpen(false);
       createForm.resetFields();
       message.success(t('admin.specialRequestTypes.created'));
+      // Open detail drawer for the newly created item
+      const newItem = resp.data as SpecialRequestTypeDto;
+      if (newItem?.id) setDetailItem(newItem);
     },
     onError: (err) => message.error(getTranslatedError(err, t, t('admin.specialRequestTypes.createFailed'))),
   });
@@ -87,7 +119,6 @@ export function SpecialRequestTypesPage() {
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['special-request-types'] });
-      setEditing(false);
       message.success(t('admin.specialRequestTypes.updated'));
     },
     onError: (err) => message.error(getTranslatedError(err, t, t('admin.specialRequestTypes.updateFailed'))),
@@ -103,10 +134,32 @@ export function SpecialRequestTypesPage() {
     onError: (err) => message.error(getTranslatedError(err, t, t('admin.specialRequestTypes.deactivateFailed'))),
   });
 
+  const activateMutation = useMutation({
+    mutationFn: (id: string) => specialRequestTypesApi.activate(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['special-request-types'] });
+      setDetailItem(null);
+      message.success(t('admin.specialRequestTypes.activated'));
+    },
+    onError: (err) => message.error(getTranslatedError(err, t, t('admin.specialRequestTypes.activateFailed'))),
+  });
+
   const openDetail = (item: SpecialRequestTypeDto) => {
     setDetailItem(item);
-    setEditing(false);
   };
+
+  // Auto-populate edit form when detail loads
+  useEffect(() => {
+    if (currentDetail) {
+      editForm.setFieldsValue({
+        name: currentDetail.name,
+        description: currentDetail.description,
+        addsProcesses: currentDetail.addsProcesses,
+        removesProcesses: currentDetail.removesProcesses,
+        onlyProcesses: currentDetail.onlyProcesses,
+      });
+    }
+  }, [currentDetail, editForm]);
 
   const renderProcessTags = (ids: string[]) => {
     if (!ids || ids.length === 0) return <Text type="secondary">—</Text>;
@@ -133,14 +186,16 @@ export function SpecialRequestTypesPage() {
     },
     { title: t('common:labels.description'), dataIndex: 'description', ellipsis: true },
     {
+      title: t('common:labels.created'),
+      dataIndex: 'createdAt',
+      width: 150,
+      render: (d: string) => d ? dayjs(d).format('DD.MM.YYYY.') : '—',
+      sorter: (a: SpecialRequestTypeDto, b: SpecialRequestTypeDto) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''),
+    },
+    {
       title: t('common:labels.status'),
       dataIndex: 'isActive',
       width: 110,
-      filters: [
-        { text: t('common:status.active'), value: true },
-        { text: t('common:status.inactive'), value: false },
-      ],
-      onFilter: (value: unknown, record: SpecialRequestTypeDto) => record.isActive === value,
       render: (active: boolean) => (
         <Tag color={active ? 'green' : 'default'}>{active ? t('common:status.active') : t('common:status.inactive')}</Tag>
       ),
@@ -171,12 +226,54 @@ export function SpecialRequestTypesPage() {
         </Button>
       </div>
 
+      <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+        <Input.Search
+          placeholder={t('common:actions.search')}
+          allowClear
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ width: 260 }}
+        />
+        <Select
+          placeholder={t('common:labels.status')}
+          allowClear
+          value={isActiveFilter}
+          onChange={(v) => setIsActiveFilter(v)}
+          style={{ width: 150 }}
+          options={[
+            { label: t('common:status.active'), value: true },
+            { label: t('common:status.inactive'), value: false },
+          ]}
+        />
+        <DatePicker
+          value={dateFrom}
+          onChange={setDateFrom}
+          format="DD.MM.YYYY"
+          allowClear
+          placeholder={t('common:labels.dateFrom')}
+        />
+        <DatePicker
+          value={dateTo}
+          onChange={setDateTo}
+          format="DD.MM.YYYY"
+          allowClear
+          placeholder={t('common:labels.dateTo')}
+        />
+      </div>
+
       <Table
         columns={columns}
         dataSource={data}
         rowKey="id"
         loading={isLoading}
         scroll={{ x: 'max-content' }}
+        pagination={{
+          current: page,
+          pageSize,
+          total: pagedResult?.totalCount,
+          onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+          showSizeChanger: true,
+        }}
         onRow={(record) => ({
           onClick: () => openDetail(record),
           style: { cursor: 'pointer' },
@@ -203,8 +300,6 @@ export function SpecialRequestTypesPage() {
           <Form.Item name="description" label={t('common:labels.description')}>
             <Input.TextArea rows={2} />
           </Form.Item>
-          <Divider style={{ margin: '12px 0' }} />
-          <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 12 }}>{t('admin.specialRequestTypes.processRules')}</Text>
           {processRuleFields}
         </Form>
       </Drawer>
@@ -213,51 +308,35 @@ export function SpecialRequestTypesPage() {
       <Drawer
         title={currentDetail ? `${currentDetail.code} — ${currentDetail.name}` : ''}
         open={!!detailItem}
-        onClose={() => { setDetailItem(null); setEditing(false); editForm.resetFields(); }}
+        onClose={() => { setDetailItem(null); editForm.resetFields(); }}
         width={Math.min(480, window.innerWidth)}
         extra={
-          editing ? (
-            <Space>
-              <Button onClick={() => {
-                setEditing(false);
-                if (currentDetail) editForm.setFieldsValue({
-                  name: currentDetail.name,
-                  description: currentDetail.description,
-                  addsProcesses: currentDetail.addsProcesses,
-                  removesProcesses: currentDetail.removesProcesses,
-                  onlyProcesses: currentDetail.onlyProcesses,
-                });
-              }}>{t('common:actions.cancel')}</Button>
-              <Button type="primary" onClick={() => editForm.submit()} loading={updateMutation.isPending}>{t('common:actions.save')}</Button>
-            </Space>
-          ) : (
-            <Space>
-              <Button onClick={() => {
-                if (currentDetail) editForm.setFieldsValue({
-                  name: currentDetail.name,
-                  description: currentDetail.description,
-                  addsProcesses: currentDetail.addsProcesses,
-                  removesProcesses: currentDetail.removesProcesses,
-                  onlyProcesses: currentDetail.onlyProcesses,
-                });
-                setEditing(true);
-              }}>{t('common:actions.edit')}</Button>
-              {currentDetail?.isActive && (
-                <Popconfirm
-                  title={t('admin.specialRequestTypes.deactivateConfirm')}
-                  okText={t('common:actions.confirm')}
-                  cancelText={t('common:actions.no')}
-                  onConfirm={() => deactivateMutation.mutate(currentDetail!.id)}
-                >
-                  <Button danger loading={deactivateMutation.isPending}>{t('admin.specialRequestTypes.deactivate')}</Button>
-                </Popconfirm>
-              )}
-            </Space>
-          )
+          <div style={{ display: 'flex', gap: 8 }}>
+            {currentDetail?.isActive ? (
+              <Popconfirm
+                title={t('admin.specialRequestTypes.deactivateConfirm')}
+                okText={t('common:actions.confirm')}
+                cancelText={t('common:actions.no')}
+                onConfirm={() => deactivateMutation.mutate(currentDetail!.id)}
+              >
+                <Button danger loading={deactivateMutation.isPending}>{t('admin.specialRequestTypes.deactivate')}</Button>
+              </Popconfirm>
+            ) : currentDetail && (
+              <Popconfirm
+                title={t('admin.specialRequestTypes.activateConfirm')}
+                okText={t('common:actions.confirm')}
+                cancelText={t('common:actions.no')}
+                onConfirm={() => activateMutation.mutate(currentDetail.id)}
+              >
+                <Button type="primary" ghost loading={activateMutation.isPending}>{t('admin.specialRequestTypes.activate')}</Button>
+              </Popconfirm>
+            )}
+            <Button type="primary" onClick={() => editForm.submit()} loading={updateMutation.isPending}>{t('common:actions.save')}</Button>
+          </div>
         }
       >
         {currentDetail && (
-          editing ? (
+          <>
             <Form
               form={editForm}
               layout="vertical"
@@ -273,45 +352,12 @@ export function SpecialRequestTypesPage() {
               <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 12 }}>{t('admin.specialRequestTypes.processRules')}</Text>
               {processRuleFields}
             </Form>
-          ) : (
-            <>
-              <div style={{ display: 'flex', gap: 24, marginBottom: 16 }}>
-                <div>
-                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>{t('common:labels.code')}</Text>
-                  <Text strong>{currentDetail.code}</Text>
-                </div>
-                <div>
-                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>{t('common:labels.status')}</Text>
-                  <Tag color={currentDetail.isActive ? 'green' : 'default'}>
-                    {currentDetail.isActive ? t('common:status.active') : t('common:status.inactive')}
-                  </Tag>
-                </div>
-              </div>
-
-              {currentDetail.description && (
-                <div style={{ marginBottom: 16 }}>
-                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>{t('common:labels.description')}</Text>
-                  <Text>{currentDetail.description}</Text>
-                </div>
-              )}
-
-              <Divider style={{ margin: '12px 0' }} />
-              <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 12 }}>{t('admin.specialRequestTypes.processRules')}</Text>
-
-              <div style={{ marginBottom: 12 }}>
-                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>{t('admin.specialRequestTypes.addsProcesses')}</Text>
-                {renderProcessTags(currentDetail.addsProcesses)}
-              </div>
-              <div style={{ marginBottom: 12 }}>
-                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>{t('admin.specialRequestTypes.removesProcesses')}</Text>
-                {renderProcessTags(currentDetail.removesProcesses)}
-              </div>
-              <div style={{ marginBottom: 12 }}>
-                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>{t('admin.specialRequestTypes.onlyProcesses')}</Text>
-                {renderProcessTags(currentDetail.onlyProcesses)}
-              </div>
-            </>
-          )
+            {currentDetail.updatedAt && (
+              <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 12 }}>
+                {t('common:labels.updated')}: {dayjs(currentDetail.updatedAt).format('DD.MM.YYYY.')}
+              </Text>
+            )}
+          </>
         )}
       </Drawer>
     </div>

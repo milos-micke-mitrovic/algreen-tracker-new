@@ -12,8 +12,8 @@ import type {
 import { apiClient } from '../axios-instance';
 
 export const productCategoriesApi = {
-  getAll(tenantId: string) {
-    return apiClient.get<PagedResult<ProductCategoryDto>>('/product-categories', { params: { tenantId } });
+  getAll(params: { tenantId: string; isActive?: boolean; search?: string; page?: number; pageSize?: number; createdFrom?: string; createdTo?: string }) {
+    return apiClient.get<PagedResult<ProductCategoryDto>>('/product-categories', { params });
   },
 
   getById(id: string) {
@@ -30,6 +30,10 @@ export const productCategoriesApi = {
 
   deactivate(id: string) {
     return apiClient.delete(`/product-categories/${id}`);
+  },
+
+  activate(id: string) {
+    return apiClient.post(`/product-categories/${id}/activate`);
   },
 
   addProcess(categoryId: string, data: AddCategoryProcessRequest) {

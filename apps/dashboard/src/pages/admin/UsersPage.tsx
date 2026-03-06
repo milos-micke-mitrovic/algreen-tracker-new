@@ -1,6 +1,15 @@
-import { useState, useMemo } from 'react';
-import { Typography, Table, Button, Drawer, Form, Input, Select, Tag, App, Switch } from 'antd';
+import { useState, useEffect, useMemo } from 'react';
+import { Typography, Table, Button, Drawer, Form, Input, Select, Tag, App, Switch, DatePicker } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
+
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { usersApi, processesApi } from '@algreen/api-client';
 import { useAuthStore } from '@algreen/auth';
@@ -16,12 +25,12 @@ function getApiErrorCode(error: unknown): string | undefined {
 }
 
 function getTranslatedError(error: unknown, t: (key: string, opts?: Record<string, string>) => string, fallback: string): string {
-  const code = getApiErrorCode(error);
-  if (code) {
-    const translated = t(`common:errors.${code}`, { defaultValue: '' });
+  const resp = (error as { response?: { data?: { error?: { code?: string; message?: string } } } })?.response?.data?.error;
+  if (resp?.code) {
+    const translated = t(`common:errors.${resp.code}`, { defaultValue: '' });
     if (translated) return translated;
   }
-  return fallback;
+  return resp?.message || fallback;
 }
 
 export function UsersPage() {
@@ -35,15 +44,37 @@ export function UsersPage() {
   const { t } = useTranslation('dashboard');
   const { tEnum } = useEnumTranslation();
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['users', tenantId],
-    queryFn: () => usersApi.getAll(tenantId!).then((r) => r.data.items),
+  const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 400);
+  const [roleFilter, setRoleFilter] = useState<string | undefined>(undefined);
+  const [isActiveFilter, setIsActiveFilter] = useState<boolean | undefined>(undefined);
+  const [dateFrom, setDateFrom] = useState<dayjs.Dayjs | null>(null);
+  const [dateTo, setDateTo] = useState<dayjs.Dayjs | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+
+  useEffect(() => { setPage(1); }, [debouncedSearch, roleFilter, isActiveFilter, dateFrom, dateTo]);
+
+  const { data: pagedResult, isLoading } = useQuery({
+    queryKey: ['users', tenantId, debouncedSearch, roleFilter, isActiveFilter, dateFrom?.format('YYYY-MM-DD'), dateTo?.format('YYYY-MM-DD'), page, pageSize],
+    queryFn: () => usersApi.getAll({
+      tenantId: tenantId!,
+      search: debouncedSearch || undefined,
+      role: roleFilter,
+      isActive: isActiveFilter,
+      createdFrom: dateFrom?.format('YYYY-MM-DD'),
+      createdTo: dateTo?.format('YYYY-MM-DD'),
+      page,
+      pageSize,
+    }).then((r) => r.data),
     enabled: !!tenantId,
   });
 
+  const data = pagedResult?.items;
+
   const { data: processes } = useQuery({
     queryKey: ['processes', tenantId],
-    queryFn: () => processesApi.getAll(tenantId!).then((r) => r.data.items),
+    queryFn: () => processesApi.getAll({ tenantId: tenantId!, pageSize: 100 }).then((r) => r.data.items),
     enabled: !!tenantId,
   });
 
@@ -113,12 +144,11 @@ export function UsersPage() {
     {
       title: t('common:labels.email'),
       dataIndex: 'email',
+      sorter: (a: UserDto, b: UserDto) => a.email.localeCompare(b.email),
     },
     {
       title: t('common:labels.role'),
       dataIndex: 'role',
-      filters: Object.values(UserRole).map((r) => ({ text: tEnum('UserRole', r), value: r })),
-      onFilter: (value: unknown, record: UserDto) => record.role === value,
       render: (r: UserRole) => <Tag>{tEnum('UserRole', r)}</Tag>,
     },
     {
@@ -134,11 +164,6 @@ export function UsersPage() {
       title: t('common:labels.status'),
       dataIndex: 'isActive',
       width: 110,
-      filters: [
-        { text: t('common:status.active'), value: true },
-        { text: t('common:status.inactive'), value: false },
-      ],
-      onFilter: (value: unknown, record: UserDto) => record.isActive === value,
       render: (active: boolean) => (
         <Tag color={active ? 'green' : 'default'}>{active ? t('common:status.active') : t('common:status.inactive')}</Tag>
       ),
@@ -148,7 +173,7 @@ export function UsersPage() {
       dataIndex: 'createdAt',
       width: 150,
       sorter: (a: UserDto, b: UserDto) => dayjs(a.createdAt).unix() - dayjs(b.createdAt).unix(),
-      render: (d: string) => dayjs(d).format('DD.MM.YYYY. HH:mm'),
+      render: (d: string) => dayjs(d).format('DD.MM.YYYY.'),
     },
   ];
 
@@ -161,12 +186,62 @@ export function UsersPage() {
         </Button>
       </div>
 
+      <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+        <Input.Search
+          placeholder={t('common:actions.search')}
+          allowClear
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ width: 260 }}
+        />
+        <Select
+          placeholder={t('common:labels.role')}
+          allowClear
+          value={roleFilter}
+          onChange={(v) => setRoleFilter(v)}
+          style={{ width: 160 }}
+          options={Object.values(UserRole).map((r) => ({ label: tEnum('UserRole', r), value: r }))}
+        />
+        <Select
+          placeholder={t('common:labels.status')}
+          allowClear
+          value={isActiveFilter}
+          onChange={(v) => setIsActiveFilter(v)}
+          style={{ width: 150 }}
+          options={[
+            { label: t('common:status.active'), value: true },
+            { label: t('common:status.inactive'), value: false },
+          ]}
+        />
+        <DatePicker
+          value={dateFrom}
+          onChange={setDateFrom}
+          format="DD.MM.YYYY"
+          allowClear
+          placeholder={t('common:labels.dateFrom')}
+        />
+        <DatePicker
+          value={dateTo}
+          onChange={setDateTo}
+          format="DD.MM.YYYY"
+          allowClear
+          placeholder={t('common:labels.dateTo')}
+        />
+      </div>
+
       <Table
         columns={columns}
         dataSource={data}
         rowKey="id"
         loading={isLoading}
         scroll={{ x: 'max-content' }}
+        pagination={{
+          current: page,
+          pageSize,
+          total: pagedResult?.totalCount,
+          onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+          showSizeChanger: true,
+        }}
         onRow={(record) => ({
           onClick: () => openEdit(record),
           style: { cursor: 'pointer' },
@@ -263,6 +338,11 @@ export function UsersPage() {
             <Switch />
           </Form.Item>
         </Form>
+        {editUser?.updatedAt && (
+          <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
+            {t('common:labels.updated')}: {dayjs(editUser.updatedAt).format('DD.MM.YYYY.')}
+          </Typography.Text>
+        )}
       </Drawer>
     </div>
   );

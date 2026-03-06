@@ -24,7 +24,7 @@ export function App() {
 
   return (
     <ConfigProvider theme={theme} locale={antdLocales[i18n.language] || srRS} form={{ requiredMark: (label, { required }) => <>{label}{required && <span style={{ color: '#ff4d4f', marginLeft: 2 }}>*</span>}</> }}>
-      <AntApp>
+      <AntApp notification={{ placement: 'bottomRight' }}>
         <QueryClientProvider client={queryClient}>
           <BrowserRouter
             future={{ v7_startTransition: true, v7_relativeSplatPath: true }}

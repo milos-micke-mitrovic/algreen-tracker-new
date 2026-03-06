@@ -16,7 +16,8 @@
     "filter": "Filtriraj",
     "configure": "Podesi",
     "add": "Dodaj",
-    "edit": "Izmeni"
+    "edit": "Izmeni",
+    "search": "Pretraži..."
   },
   "labels": {
     "email": "Email",
@@ -28,6 +29,10 @@
     "description": "Opis",
     "actions": "Akcije",
     "created": "Kreirano",
+    "updated": "Izmenjeno",
+    "handledAt": "Obrađeno",
+    "dateFrom": "Od datuma",
+    "dateTo": "Do datuma",
     "priority": "Prioritet",
     "notes": "Napomene",
     "role": "Uloga",
@@ -86,6 +91,7 @@
     "ORDER_NOT_DRAFT": "Ova akcija je dozvoljena samo za narudžbine u pripremi",
     "DUPLICATE_PROCESS": "Ovaj proces je već dodat",
     "DUPLICATE_SUBPROCESS": "Ovaj podproces je već dodat",
+    "DUPLICATE_ORDER": "Podproces sa ovim rednim brojem već postoji",
     "SUBPROCESSES_NOT_COMPLETE": "Svi podprocesi moraju biti završeni",
     "REASON_REQUIRED": "Razlog je obavezan",
     "NOT_BLOCKED": "Ovaj proces nije blokiran",
@@ -111,7 +117,14 @@
     "ATTACHMENT_NOT_FOUND": "Prilog nije pronađen",
     "DUPLICATE_CODE": "Šifra već postoji",
     "CATEGORY_NAME_EXISTS": "Kategorija sa ovim imenom već postoji",
-    "INTERNAL_ERROR": "Došlo je do neočekivane greške"
+    "TENANT_CODE_EXISTS": "Firma sa ovom šifrom već postoji",
+    "TENANT_NAME_REQUIRED": "Naziv firme je obavezan",
+    "TENANT_CODE_REQUIRED": "Šifra firme je obavezna",
+    "TENANT_CODE_TOO_LONG": "Šifra firme mora imati najviše 50 karaktera",
+    "SHIFT_NAME_EXISTS": "Smena sa ovim imenom već postoji",
+    "INTERNAL_ERROR": "Došlo je do neočekivane greške",
+    "connectionFailed": "Nije moguće povezati se sa serverom",
+    "connectionFailedDescription": "Server ne odgovara. Proverite konekciju ili pokušajte ponovo kasnije."
   },
   "enums": {
     "OrderStatus": {

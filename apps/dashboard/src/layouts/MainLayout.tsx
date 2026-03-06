@@ -10,6 +10,7 @@ import {
 import { tokenManager } from '@algreen/api-client';
 import { SidebarMenu } from '../components/SidebarMenu';
 import { AppHeader } from '../components/AppHeader';
+import { ConnectionAlert } from '../components/ConnectionAlert';
 import { useSignalRQueryInvalidation } from '../hooks/useSignalRQueryInvalidation';
 
 const { Sider, Content } = Layout;
@@ -78,6 +79,7 @@ export function MainLayout() {
             minHeight: 280,
           }}
         >
+          <ConnectionAlert />
           <Outlet />
         </Content>
       </Layout>

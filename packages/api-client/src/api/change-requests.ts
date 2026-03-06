@@ -6,16 +6,12 @@ import type {
 import { apiClient } from '../axios-instance';
 
 export const changeRequestsApi = {
-  getAll(tenantId: string, status?: RequestStatus) {
-    return apiClient.get<PagedResult<ChangeRequestDto>>('/change-requests', {
-      params: { tenantId, status },
-    });
+  getAll(params: { tenantId: string; status?: RequestStatus; requestType?: string; search?: string; page?: number; pageSize?: number; createdFrom?: string; createdTo?: string }) {
+    return apiClient.get<PagedResult<ChangeRequestDto>>('/change-requests', { params });
   },
 
-  getMy(tenantId: string, userId: string) {
-    return apiClient.get<PagedResult<ChangeRequestDto>>('/change-requests/my', {
-      params: { tenantId, userId },
-    });
+  getMy(params: { tenantId: string; userId: string; status?: RequestStatus; search?: string; page?: number; pageSize?: number }) {
+    return apiClient.get<PagedResult<ChangeRequestDto>>('/change-requests/my', { params });
   },
 
   create(data: CreateChangeRequestRequest) {

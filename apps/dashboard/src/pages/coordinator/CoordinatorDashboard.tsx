@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Row, Col, Card, Typography, Table, Alert, Statistic, List, Tag, Badge, Tooltip, Button } from 'antd';
+import { Row, Col, Card, Typography, Table, Alert, Statistic, List, Tag, Badge, Tooltip, Button, Drawer } from 'antd';
 import {
   WarningOutlined,
   ClockCircleOutlined,
@@ -24,7 +25,7 @@ import {
   useDashboardStatistics,
   usePendingChangeRequests,
 } from '../../hooks/useDashboard';
-import { useTranslation } from '@algreen/i18n';
+import { useTranslation, useEnumTranslation } from '@algreen/i18n';
 
 const { Title, Text } = Typography;
 
@@ -45,6 +46,7 @@ function formatTime(iso: string): string {
 
 export function CoordinatorDashboard() {
   const navigate = useNavigate();
+  const [activeOrdersProcess, setActiveOrdersProcess] = useState<LiveViewProcessDto | null>(null);
   const warnings = useDashboardWarnings();
   const liveView = useDashboardLiveView();
   const workers = useDashboardWorkersStatus();
@@ -52,6 +54,7 @@ export function CoordinatorDashboard() {
   const statistics = useDashboardStatistics();
   const changeRequests = usePendingChangeRequests();
   const { t } = useTranslation('dashboard');
+  const { tEnum } = useEnumTranslation();
 
   return (
     <div>
@@ -99,6 +102,7 @@ export function CoordinatorDashboard() {
             loading={warnings.isLoading}
           >
             {Array.isArray(warnings.data) && warnings.data.length > 0 ? (
+              <div style={{ maxHeight: 300, overflowY: 'auto' }}>
               <List
                 size="small"
                 dataSource={warnings.data as DeadlineWarningDto[]}
@@ -131,6 +135,7 @@ export function CoordinatorDashboard() {
                   );
                 }}
               />
+              </div>
             ) : (
               !warnings.isLoading && <Alert message={t('coordinator.noWarnings')} type="success" />
             )}
@@ -147,6 +152,10 @@ export function CoordinatorDashboard() {
                 rowKey={(r) => r.processId}
                 pagination={false}
                 scroll={{ x: 'max-content' }}
+                onRow={(record) => ({
+                  onClick: () => setActiveOrdersProcess(record),
+                  style: { cursor: 'pointer' },
+                })}
                 columns={[
                   {
                     title: t('coordinator.liveProcess'),
@@ -198,41 +207,6 @@ export function CoordinatorDashboard() {
                     width: 100,
                     align: 'center' as const,
                     render: (v: number) => <Badge count={v} showZero color={v > 0 ? 'green' : 'default'} />,
-                  },
-                  {
-                    title: t('coordinator.liveActiveOrders'),
-                    key: 'activeOrders',
-                    render: (_, r) => {
-                      if (!Array.isArray(r.activeOrders) || r.activeOrders.length === 0) {
-                        return <Text type="secondary">{t('coordinator.liveNoActiveOrders')}</Text>;
-                      }
-                      return (
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                          {r.activeOrders.map((o: LiveViewOrderDto, idx: number) => {
-                            const key = `${r.processId}-${o.orderItemId ?? idx}`;
-                            if (o.isBlocked) {
-                              return (
-                                <Tooltip key={key} title={`${t('coordinator.blockReason')}: ${o.blockReason ?? '—'}`}>
-                                  <Tag
-                                    color="red"
-                                    icon={<StopOutlined />}
-                                    style={{ borderStyle: 'dashed', margin: 0 }}
-                                  >
-                                    {o.orderNumber} · {o.productName}
-                                  </Tag>
-                                </Tooltip>
-                              );
-                            }
-                            const tagColor = o.status === 'InProgress' ? 'green' : o.status === 'Pending' ? 'default' : 'blue';
-                            return (
-                              <Tag key={key} color={tagColor} style={{ margin: 0 }}>
-                                {o.orderNumber} · {o.productName}
-                              </Tag>
-                            );
-                          })}
-                        </div>
-                      );
-                    },
                   },
                 ]}
               />
@@ -300,7 +274,7 @@ export function CoordinatorDashboard() {
                     }
                   >
                     <List.Item.Meta
-                      title={<Tag color="blue">{item.requestType}</Tag>}
+                      title={<Tag color="blue">{tEnum('ChangeRequestType', item.requestType)}</Tag>}
                       description={item.description}
                     />
                   </List.Item>
@@ -312,6 +286,42 @@ export function CoordinatorDashboard() {
           </Card>
         </Col>
       </Row>
+
+      {/* Active Orders Drawer */}
+      <Drawer
+        title={activeOrdersProcess ? `${activeOrdersProcess.processCode} — ${activeOrdersProcess.processName}` : ''}
+        open={!!activeOrdersProcess}
+        onClose={() => setActiveOrdersProcess(null)}
+        width={480}
+      >
+        {activeOrdersProcess && Array.isArray(activeOrdersProcess.activeOrders) && (
+          <List
+            size="small"
+            dataSource={activeOrdersProcess.activeOrders as LiveViewOrderDto[]}
+            renderItem={(o: LiveViewOrderDto, idx: number) => (
+              <List.Item key={o.orderItemId ?? idx}>
+                <List.Item.Meta
+                  title={
+                    <>{o.orderNumber} · {o.productName}</>
+                  }
+                  description={
+                    <>
+                      <Tag color={o.status === 'InProgress' ? 'green' : o.status === 'Pending' ? 'default' : 'blue'}>
+                        {tEnum('ProcessStatus', o.status)}
+                      </Tag>
+                      {o.isBlocked && (
+                        <Tag color="red" icon={<StopOutlined />} style={{ borderStyle: 'dashed' }}>
+                          {t('coordinator.blocked')}{o.blockReason ? `: ${o.blockReason}` : ''}
+                        </Tag>
+                      )}
+                    </>
+                  }
+                />
+              </List.Item>
+            )}
+          />
+        )}
+      </Drawer>
     </div>
   );
 }
