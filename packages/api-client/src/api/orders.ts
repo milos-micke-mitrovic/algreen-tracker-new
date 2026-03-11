@@ -81,6 +81,10 @@ export const ordersApi = {
     return apiClient.post(`/orders/${id}/cancel`);
   },
 
+  reopen(id: string) {
+    return apiClient.post(`/orders/${id}/reopen`);
+  },
+
   changePriority(id: string, priority: number) {
     return apiClient.put(`/orders/${id}/priority`, { priority });
   },
@@ -111,15 +115,17 @@ export const ordersApi = {
 
   // --- Attachments ---
 
-  getAttachments(orderId: string) {
-    return apiClient.get<OrderAttachmentDto[]>(`/orders/${orderId}/attachments`);
+  getAttachments(orderId: string, orderItemId?: string) {
+    return apiClient.get<OrderAttachmentDto[]>(`/orders/${orderId}/attachments`, {
+      params: orderItemId ? { orderItemId } : undefined,
+    });
   },
 
-  uploadAttachment(orderId: string, file: File, tenantId: string) {
+  uploadAttachment(orderId: string, file: File, tenantId: string, orderItemId?: string) {
     const formData = new FormData();
     formData.append('file', file);
     return apiClient.post<OrderAttachmentDto>(`/orders/${orderId}/attachments`, formData, {
-      params: { tenantId },
+      params: { tenantId, ...(orderItemId ? { orderItemId } : {}) },
       headers: { 'Content-Type': 'multipart/form-data' },
     });
   },

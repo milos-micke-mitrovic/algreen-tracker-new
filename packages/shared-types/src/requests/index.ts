@@ -231,6 +231,8 @@ export interface CreateProductCategoryRequest {
   tenantId: string;
   name: string;
   description?: string;
+  defaultWarningDays?: number;
+  defaultCriticalDays?: number;
   processes?: CategoryProcessInput[];
   dependencies?: CategoryDependencyInput[];
 }
@@ -238,6 +240,8 @@ export interface CreateProductCategoryRequest {
 export interface UpdateProductCategoryRequest {
   name: string;
   description?: string;
+  defaultWarningDays?: number;
+  defaultCriticalDays?: number;
   processes?: CategoryProcessInput[];
   dependencies?: CategoryDependencyInput[];
 }

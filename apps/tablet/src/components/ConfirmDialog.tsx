@@ -29,8 +29,8 @@ export function ConfirmDialog({
       : 'bg-primary-500 text-white active:bg-primary-700';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6">
-      <div className="bg-white rounded-2xl w-full max-w-sm p-6 space-y-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6" onClick={onCancel}>
+      <div className="bg-white rounded-2xl w-full max-w-sm p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
         <h2 className="text-tablet-lg font-bold text-center">{title}</h2>
         <p className="text-tablet-sm text-gray-600 text-center">{message}</p>
         <div className="space-y-3 pt-2">

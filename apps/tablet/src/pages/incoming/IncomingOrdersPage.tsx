@@ -206,7 +206,12 @@ function IncomingCard({
         </div>
 
         <div className="flex items-center justify-between text-tablet-sm text-gray-600 mb-2">
-          <span>{item.productName}</span>
+          <span>
+            {item.productCategoryName && (
+              <span className="text-gray-400 mr-1">{item.productCategoryName} /</span>
+            )}
+            {item.productName}
+          </span>
           <span>{t('queue.qty', { count: item.quantity })}</span>
           <span className={daysUntilDelivery <= 3 ? 'text-red-600 font-bold' : ''}>
             {t('incoming.daysLeft', { count: daysUntilDelivery })}

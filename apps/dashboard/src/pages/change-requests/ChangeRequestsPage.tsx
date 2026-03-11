@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
+import { useTableHeight } from '../../hooks/useTableHeight';
 import { Typography, Table, Space, Button, App, Popconfirm, Tag, Input, Select, DatePicker } from 'antd';
+import { useNavigate } from 'react-router-dom';
 
 function useDebounce<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -47,6 +49,9 @@ export function ChangeRequestsPage() {
   const { message } = App.useApp();
   const { t } = useTranslation('dashboard');
   const { tEnum } = useEnumTranslation();
+  const navigate = useNavigate();
+
+  const { ref: tableWrapperRef, height: tableBodyHeight } = useTableHeight();
 
   useEffect(() => { setPage(1); }, [debouncedSearch, statusFilter, dateFrom, dateTo]);
 
@@ -90,6 +95,17 @@ export function ChangeRequestsPage() {
       dataIndex: 'status',
       width: 110,
       render: (s: RequestStatus) => <StatusBadge status={s} />,
+    },
+    {
+      title: t('common:labels.order'),
+      dataIndex: 'orderNumber',
+      width: 140,
+      render: (orderNumber: string | null, record: ChangeRequestDto) =>
+        orderNumber ? (
+          <Button type="link" size="small" style={{ padding: 0 }} onClick={(e) => { e.stopPropagation(); navigate(`/orders?detail=${record.orderId}`); }}>
+            {orderNumber}
+          </Button>
+        ) : '—',
     },
     {
       title: t('common:labels.type'),
@@ -172,7 +188,7 @@ export function ChangeRequestsPage() {
   ];
 
   return (
-    <div>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
       <Title level={4} style={{ marginBottom: 16 }}>{t('changeRequests.title')}</Title>
 
       <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
@@ -207,20 +223,22 @@ export function ChangeRequestsPage() {
         />
       </div>
 
-      <Table
-        columns={columns}
-        dataSource={pagedResult?.items}
-        rowKey="id"
-        loading={isLoading}
-        scroll={{ x: 'max-content' }}
-        pagination={{
-          current: page,
-          pageSize,
-          total: pagedResult?.totalCount,
-          onChange: (p, ps) => { setPage(p); setPageSize(ps); },
-          showSizeChanger: true,
-        }}
-      />
+      <div ref={tableWrapperRef} style={{ flex: 1, minHeight: 0 }}>
+        <Table
+          columns={columns}
+          dataSource={pagedResult?.items}
+          rowKey="id"
+          loading={isLoading}
+          scroll={{ x: 'max-content', y: tableBodyHeight }}
+          pagination={{
+            current: page,
+            pageSize,
+            total: pagedResult?.totalCount,
+            onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+            showSizeChanger: true,
+          }}
+        />
+      </div>
     </div>
   );
 }

@@ -1,21 +1,28 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
+import { useTableHeight } from '../../hooks/useTableHeight';
 import {
   Typography, Table, Button, Drawer, Form, Input, InputNumber, Tag, App,
   Popconfirm, Divider, Select, DatePicker,
 } from 'antd';
-import { PlusOutlined, DeleteOutlined } from '@ant-design/icons';
+import { PlusOutlined, DeleteOutlined, HolderOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { processesApi } from '@algreen/api-client';
 import { useAuthStore } from '@algreen/auth';
 import type { ProcessDto, SubProcessDto } from '@algreen/shared-types';
 import { useTranslation } from '@algreen/i18n';
 import dayjs from 'dayjs';
+import {
+  DndContext, closestCenter, PointerSensor, useSensor, useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext, verticalListSortingStrategy, useSortable,
+  arrayMove,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import React from 'react';
 
 const { Title, Text } = Typography;
-
-function getApiErrorCode(error: unknown): string | undefined {
-  return (error as { response?: { data?: { error?: { code?: string } } } })?.response?.data?.error?.code;
-}
 
 function getTranslatedError(error: unknown, t: (key: string, opts?: Record<string, string>) => string, fallback: string): string {
   const resp = (error as { response?: { data?: { error?: { code?: string; message?: string } } } })?.response?.data?.error;
@@ -33,6 +40,43 @@ function useDebounce<T>(value: T, delay: number): T {
     return () => clearTimeout(timer);
   }, [value, delay]);
   return debounced;
+}
+
+// ─── Sortable table row ──────────────────────────────────────
+
+const DragHandleContext = React.createContext<ReturnType<typeof useSortable>['listeners']>(undefined);
+
+interface SortableRowProps extends React.HTMLAttributes<HTMLTableRowElement> {
+  'data-row-key'?: string;
+}
+
+function SortableRow(props: SortableRowProps) {
+  const id = props['data-row-key'] ?? '';
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+
+  const style: React.CSSProperties = {
+    ...props.style,
+    transform: CSS.Translate.toString(transform),
+    transition,
+    ...(isDragging ? { position: 'relative', zIndex: 99 } : {}),
+  };
+
+  return (
+    <DragHandleContext.Provider value={listeners}>
+      <tr {...props} ref={setNodeRef} style={style} {...attributes} />
+    </DragHandleContext.Provider>
+  );
+}
+
+function DragHandle() {
+  const listeners = React.useContext(DragHandleContext);
+  return (
+    <HolderOutlined
+      style={{ color: '#999', cursor: 'grab' }}
+      {...listeners}
+      onClick={(e) => e.stopPropagation()}
+    />
+  );
 }
 
 export function ProcessesPage() {
@@ -55,6 +99,8 @@ export function ProcessesPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
+  const { ref: tableWrapperRef, height: tableBodyHeight } = useTableHeight();
+
   useEffect(() => { setPage(1); }, [debouncedSearch, isActiveFilter, dateFrom, dateTo]);
 
   // ─── Pending sub-processes for create drawer (controlled state) ────
@@ -76,6 +122,12 @@ export function ProcessesPage() {
     }).then((r) => r.data),
     enabled: !!tenantId,
   });
+
+  // Auto sequence order for new process
+  const nextSequenceOrder = useMemo(() => {
+    if (!pagedResult?.items?.length) return 1;
+    return Math.max(...pagedResult.items.map((p) => p.sequenceOrder)) + 1;
+  }, [pagedResult]);
 
   // Refresh detail from list data
   const currentDetail = detailProcess
@@ -152,6 +204,14 @@ export function ProcessesPage() {
     onError: (err) => message.error(getTranslatedError(err, t, t('admin.processes.activateFailed'))),
   });
 
+  const reorderMutation = useMutation({
+    mutationFn: (items: { id: string; sequenceOrder: number }[]) => processesApi.reorder(items),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['processes'] });
+    },
+    onError: (err) => message.error(getTranslatedError(err, t, t('admin.processes.updateFailed'))),
+  });
+
   // ─── Pending sub-process changes for edit drawer ────────
   const [pendingSubAdds, setPendingSubAdds] = useState<{ key: number; name: string; sequenceOrder: number }[]>([]);
   const [pendingSubRemovals, setPendingSubRemovals] = useState<Set<string>>(new Set());
@@ -172,7 +232,37 @@ export function ProcessesPage() {
     setAddSubOrder(addSubOrder + 1);
   };
 
+  // ─── Drag-and-drop ────────────────────────────────
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id || !pagedResult?.items) return;
+
+    const items = [...pagedResult.items];
+    const oldIndex = items.findIndex((i) => i.id === active.id);
+    const newIndex = items.findIndex((i) => i.id === over.id);
+    if (oldIndex === -1 || newIndex === -1) return;
+
+    const reordered = arrayMove(items, oldIndex, newIndex);
+    const updates = reordered.map((item, idx) => ({ id: item.id, sequenceOrder: idx + 1 }));
+
+    // Optimistic update
+    queryClient.setQueryData(
+      ['processes', tenantId, debouncedSearch, isActiveFilter, dateFrom?.format('YYYY-MM-DD'), dateTo?.format('YYYY-MM-DD'), page, pageSize],
+      { ...pagedResult, items: reordered.map((item, idx) => ({ ...item, sequenceOrder: idx + 1 })) },
+    );
+
+    reorderMutation.mutate(updates);
+  };
+
   const columns = [
+    {
+      title: '',
+      dataIndex: 'dragHandle',
+      width: 40,
+      render: () => <DragHandle />,
+    },
     {
       title: t('common:labels.code'),
       dataIndex: 'code',
@@ -219,10 +309,10 @@ export function ProcessesPage() {
   const activeSubs = existingSubs;
 
   return (
-    <div>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>{t('admin.processes.title')}</Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => { createForm.resetFields(); setPendingSubProcesses([]); setAddSubName(''); setAddSubOrder(1); setCreateOpen(true); }}>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => { createForm.resetFields(); createForm.setFieldValue('sequenceOrder', nextSequenceOrder); setPendingSubProcesses([]); setAddSubName(''); setAddSubOrder(1); setCreateOpen(true); }}>
           {t('admin.processes.addProcess')}
         </Button>
       </div>
@@ -262,24 +352,31 @@ export function ProcessesPage() {
         />
       </div>
 
-      <Table
-        columns={columns}
-        dataSource={pagedResult?.items}
-        rowKey="id"
-        loading={isLoading}
-        scroll={{ x: 'max-content' }}
-        pagination={{
-          current: page,
-          pageSize,
-          total: pagedResult?.totalCount,
-          onChange: (p, ps) => { setPage(p); setPageSize(ps); },
-          showSizeChanger: true,
-        }}
-        onRow={(record) => ({
-          onClick: () => openDetail(record),
-          style: { cursor: 'pointer' },
-        })}
-      />
+      <div ref={tableWrapperRef} style={{ flex: 1, minHeight: 0 }}>
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext items={pagedResult?.items?.map((i) => i.id) ?? []} strategy={verticalListSortingStrategy}>
+            <Table
+              columns={columns}
+              dataSource={pagedResult?.items}
+              rowKey="id"
+              loading={isLoading}
+              scroll={{ x: 'max-content', y: tableBodyHeight }}
+              components={{ body: { row: SortableRow } }}
+              pagination={{
+                current: page,
+                pageSize,
+                total: pagedResult?.totalCount,
+                onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+                showSizeChanger: true,
+              }}
+              onRow={(record) => ({
+                onClick: () => openDetail(record),
+                style: { cursor: 'pointer' },
+              })}
+            />
+          </SortableContext>
+        </DndContext>
+      </div>
 
       {/* Create Process Drawer */}
       <Drawer

@@ -18,8 +18,8 @@ export function CheckOutPage() {
   const { tEnum } = useEnumTranslation();
   const [showConfirm, setShowConfirm] = useState(false);
 
-  const handleLogout = async () => {
-    await unsubscribeFromPush();
+  const handleLogout = () => {
+    unsubscribeFromPush().catch(() => {});
     clearWorkSession();
     logout();
     navigate('/login', { replace: true });
@@ -66,12 +66,6 @@ export function CheckOutPage() {
           {t('checkout.checkOut')}
         </BigButton>
 
-        <BigButton
-          variant="secondary"
-          onClick={() => navigate('/queue')}
-        >
-          {t('checkout.goBack')}
-        </BigButton>
       </div>
 
       <ConfirmDialog

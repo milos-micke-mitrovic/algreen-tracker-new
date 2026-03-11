@@ -157,11 +157,14 @@ export interface BlockRequestDto {
   handledAt: string | null;
   blockReason: string | null;
   rejectionNote: string | null;
+  orderId: string | null;
+  orderNumber: string | null;
 }
 
 export interface ChangeRequestDto {
   id: string;
   orderId: string;
+  orderNumber: string | null;
   requestedByUserId: string;
   requestType: ChangeRequestType;
   description: string;
@@ -228,6 +231,8 @@ export interface ProductCategoryDto {
   name: string;
   description: string | null;
   isActive: boolean;
+  defaultWarningDays: number | null;
+  defaultCriticalDays: number | null;
   createdAt: string;
   updatedAt: string | null;
 }
@@ -238,6 +243,8 @@ export interface ProductCategoryDetailDto {
   name: string;
   description: string | null;
   isActive: boolean;
+  defaultWarningDays: number | null;
+  defaultCriticalDays: number | null;
   createdAt: string;
   updatedAt: string | null;
   processes: ProductCategoryProcessDto[];
@@ -365,6 +372,7 @@ export interface TenantSettingsDto {
 export interface OrderAttachmentDto {
   id: string;
   orderId: string;
+  orderItemId: string | null;
   originalFileName: string;
   contentType: string;
   fileSizeBytes: number;
@@ -380,6 +388,7 @@ export interface TabletQueueItemDto {
   priority: number;
   deliveryDate: string;
   productName: string;
+  productCategoryName: string | null;
   quantity: number;
   complexity: ComplexityType | null;
   status: ProcessStatus;
@@ -395,6 +404,7 @@ export interface TabletActiveWorkDto {
   priority: number;
   deliveryDate: string;
   productName: string;
+  productCategoryName: string | null;
   quantity: number;
   complexity: ComplexityType | null;
   status: ProcessStatus;
@@ -424,6 +434,7 @@ export interface TabletIncomingDto {
   priority: number;
   deliveryDate: string;
   productName: string;
+  productCategoryName: string | null;
   quantity: number;
   complexity: ComplexityType | null;
   status: ProcessStatus;

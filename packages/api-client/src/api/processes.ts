@@ -24,6 +24,10 @@ export const processesApi = {
     return apiClient.put<ProcessDto>(`/processes/${id}`, data);
   },
 
+  reorder(items: { id: string; sequenceOrder: number }[]) {
+    return apiClient.post('/processes/reorder', { items });
+  },
+
   deactivate(id: string) {
     return apiClient.delete(`/processes/${id}`);
   },

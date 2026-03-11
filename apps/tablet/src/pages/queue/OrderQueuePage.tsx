@@ -12,16 +12,14 @@ import { AttachmentIndicator } from '../../components/AttachmentIndicator';
 import { useTranslation, useEnumTranslation } from '@algreen/i18n';
 import { useWorkSessionStore } from '../../stores/work-session-store';
 
-function formatDuration(minutes: number): string {
-  if (minutes < 60) return `${minutes}min`;
-  if (minutes < 1440) {
-    const h = Math.floor(minutes / 60);
-    const m = minutes % 60;
-    return m > 0 ? `${h}h ${m}min` : `${h}h`;
-  }
-  const d = Math.floor(minutes / 1440);
-  const remainH = Math.floor((minutes % 1440) / 60);
-  return remainH > 0 ? `${d}d ${remainH}h` : `${d}d`;
+function formatDuration(totalSeconds: number): string {
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return seconds > 0 ? `${minutes}min ${seconds}s` : `${minutes}min`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m > 0 ? `${h}h ${m}min` : `${h}h`;
 }
 
 function getApiErrorCode(error: unknown): string | undefined {
@@ -105,6 +103,7 @@ export function OrderQueuePage() {
             priority: w.priority,
             deliveryDate: w.deliveryDate,
             productName: w.productName,
+            productCategoryName: w.productCategoryName,
             quantity: w.quantity,
             complexity: w.complexity,
             status: w.status,
@@ -305,7 +304,12 @@ function QueueCard({
           </div>
         </div>
         <div className="flex items-center justify-between text-tablet-sm text-gray-600">
-          <span>{item.productName}</span>
+          <span>
+            {item.productCategoryName && (
+              <span className="text-gray-400 mr-1">{item.productCategoryName} /</span>
+            )}
+            {item.productName}
+          </span>
           <span>{t('queue.qty', { count: item.quantity })}</span>
           {item.complexity && <span>{tEnum('ComplexityType', item.complexity)}</span>}
           <span className={daysUntilDelivery <= 3 ? 'text-red-600 font-bold' : ''}>
@@ -386,10 +390,11 @@ function WorkPanel({
     (sp) => sp.status === SubProcessStatus.Completed || sp.isWithdrawn,
   ) ?? false;
 
-  // Compute elapsed = accumulated sub-process duration + current session time
+  // Compute elapsed = accumulated duration + current session time
   const elapsed = useMemo(() => {
     if (!activeWork) return 0;
-    const prior = (activeWork.totalDurationMinutes ?? 0) * 60;
+    // Both paths now store accumulated seconds in totalDurationMinutes
+    const prior = activeWork.totalDurationMinutes ?? 0;
     if (isTimerRunning && activeWork.currentLogStartedAt) {
       const sinceLogStart = Math.floor((Date.now() - new Date(activeWork.currentLogStartedAt).getTime()) / 1000);
       return prior + Math.max(sinceLogStart, 0);
@@ -608,7 +613,7 @@ function WorkPanel({
           >
             {t('work.start')}
           </BigButton>
-        ) : hasSubProcesses ? (
+        ) : (
           <>
             {isTimerRunning ? (
               <BigButton
@@ -618,15 +623,15 @@ function WorkPanel({
               >
                 {t('work.pause')}
               </BigButton>
-            ) : (
+            ) : (!hasSubProcesses || activeWork?.subProcesses?.some(sp => sp.status === SubProcessStatus.InProgress)) ? (
               <BigButton
                 onClick={() => { setError(null); resumeMutation.mutate(); }}
                 loading={resumeMutation.isPending || pendingAction}
               >
                 {t('work.resume')}
               </BigButton>
-            )}
-            {allSubsDone && (
+            ) : null}
+            {(!hasSubProcesses || allSubsDone) && (
               <BigButton
                 onClick={() => { setError(null); setShowCompleteConfirm(true); }}
                 loading={completeMutation.isPending || pendingAction}
@@ -635,13 +640,6 @@ function WorkPanel({
               </BigButton>
             )}
           </>
-        ) : (
-          <BigButton
-            onClick={() => { setError(null); setShowCompleteConfirm(true); }}
-            loading={completeMutation.isPending || pendingAction}
-          >
-            {t('work.complete')}
-          </BigButton>
         )}
 
         <BigButton
@@ -667,8 +665,8 @@ function WorkPanel({
 
       {/* Block request modal */}
       {showBlockModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6">
-          <div className="bg-white rounded-2xl w-full max-w-sm p-6 space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6" onClick={() => { setShowBlockModal(false); setBlockReason(''); }}>
+          <div className="bg-white rounded-2xl w-full max-w-sm p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
             <h2 className="text-tablet-lg font-bold text-center">{t('work.reportIssue')}</h2>
             <textarea
               value={blockReason}

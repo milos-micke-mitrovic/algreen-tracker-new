@@ -112,3 +112,14 @@ export function useCancelOrder() {
     },
   });
 }
+
+export function useReopenOrder() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => ordersApi.reopen(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['orders'] });
+      queryClient.invalidateQueries({ queryKey: ['orders-master-view'] });
+    },
+  });
+}

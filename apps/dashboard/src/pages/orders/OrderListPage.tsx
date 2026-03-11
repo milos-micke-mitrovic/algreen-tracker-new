@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Typography, Table, Button, Space, Select, Tag, Drawer, Form, Input,
   InputNumber, DatePicker, App, Row, Col, Spin, Popconfirm, Divider,
@@ -11,13 +12,14 @@ import { OrderStatus, OrderType, ProcessStatus, ComplexityType, UserRole } from 
 import type { OrderMasterViewDto, OrderDetailDto, OrderItemDto, ProcessDto, ProductCategoryDto, SpecialRequestTypeDto, AddOrderItemRequest } from '@algreen/shared-types';
 import {
   useCreateOrder, useOrder, useActivateOrder,
-  useUpdateOrder, useCancelOrder, usePauseOrder, useResumeOrder,
+  useUpdateOrder, useCancelOrder, usePauseOrder, useResumeOrder, useReopenOrder,
 } from '../../hooks/useOrders';
 import { productCategoriesApi, processesApi, ordersApi, specialRequestTypesApi } from '@algreen/api-client';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { StatusBadge } from '../../components/StatusBadge';
 import { OrderAttachments } from '../../components/OrderAttachments';
 import { compressFile } from '../../utils/compressImage';
+import { useTableHeight } from '../../hooks/useTableHeight';
 import { useTranslation, useEnumTranslation } from '@algreen/i18n';
 import dayjs from 'dayjs';
 
@@ -330,7 +332,10 @@ export function OrderListPage() {
   const [dateFrom, setDateFrom] = useState<dayjs.Dayjs | null>(null);
   const [dateTo, setDateTo] = useState<dayjs.Dayjs | null>(null);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  const [pageSize, setPageSize] = useState(() => {
+    const saved = localStorage.getItem('orders-pageSize');
+    return saved ? Number(saved) : 20;
+  });
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearch(search), 400);
@@ -353,11 +358,23 @@ export function OrderListPage() {
     }).then((r) => r.data),
     enabled: !!tenantId,
   });
+  const [searchParams, setSearchParams] = useSearchParams();
   const [isCreating, setIsCreating] = useState(false);
-  const [detailOrderId, setDetailOrderId] = useState<string | null>(null);
+  const [detailOrderId, setDetailOrderId] = useState<string | null>(() => searchParams.get('detail'));
+
+  // Clear detail param from URL after reading it
+  useEffect(() => {
+    if (searchParams.has('detail')) {
+      searchParams.delete('detail');
+      setSearchParams(searchParams, { replace: true });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [addingItem, setAddingItem] = useState(false);
   const [createPendingItems, setCreatePendingItems] = useState<AddOrderItemRequest[]>([]);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+
+  const { ref: tableWrapperRef, height: tableBodyHeight } = useTableHeight();
+
   const [localPriority, setLocalPriority] = useState<number | null>(null);
   const priorityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [form] = Form.useForm();
@@ -366,6 +383,7 @@ export function OrderListPage() {
   const createOrder = useCreateOrder();
   const updateOrder = useUpdateOrder();
   const cancelOrder = useCancelOrder();
+  const reopenOrder = useReopenOrder();
   const pauseOrder = usePauseOrder();
   const resumeOrder = useResumeOrder();
   const { data: detailOrder, isLoading: detailLoading } = useOrder(detailOrderId ?? undefined);
@@ -373,7 +391,7 @@ export function OrderListPage() {
   const { data: categories } = useQuery({
     queryKey: ['product-categories', tenantId],
     queryFn: () => productCategoriesApi.getAll({ tenantId: tenantId!, pageSize: 100 }).then((r) => r.data.items),
-    enabled: !!tenantId && (addingItem || isCreating || (!!detailOrderId && detailOrder?.status === OrderStatus.Draft)),
+    enabled: !!tenantId,
   });
   const { data: specialRequestTypes } = useQuery({
     queryKey: ['special-request-types', tenantId],
@@ -579,8 +597,8 @@ export function OrderListPage() {
     // Add one column per process
     const processColDefs: ColumnsType<OrderMasterViewDto> = (processes ?? []).map((proc) => ({
       title: (
-        <Tooltip title={proc.name}>
-          <span style={{ fontSize: 11, cursor: 'default' }}>{proc.code}</span>
+        <Tooltip title={`${proc.code} — ${proc.name}`}>
+          <span style={{ fontSize: 11, cursor: 'default' }}>{proc.name}</span>
         </Tooltip>
       ),
       key: proc.id,
@@ -637,7 +655,7 @@ export function OrderListPage() {
     detailDeadlineLevel === 'warning' ? '#FAAD14' : undefined;
 
   return (
-    <div>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>
           {t('orders.title')}
@@ -646,7 +664,15 @@ export function OrderListPage() {
           <Button
             type="primary"
             icon={<PlusOutlined />}
-            onClick={() => { form.resetFields(); setCreatePendingItems([]); setPendingFiles([]); setAddingItem(false); setIsCreating(true); }}
+            onClick={() => {
+              form.resetFields();
+              setCreatePendingItems([]);
+              setPendingFiles([]);
+              setAddingItem(true);
+              const maxPriority = (masterResult?.items ?? []).reduce((max, o) => Math.max(max, o.priority), 0);
+              form.setFieldValue('priority', maxPriority + 10);
+              setIsCreating(true);
+            }}
           >
             {t('orders.createOrder')}
           </Button>
@@ -693,38 +719,42 @@ export function OrderListPage() {
         />
       </div>
 
-      <Table<OrderMasterViewDto>
-        className="master-table"
-        columns={masterColumns}
-        dataSource={masterResult?.items}
-        rowKey="id"
-        loading={isLoading}
-        pagination={{
-          current: page,
-          pageSize,
-          total: masterResult?.totalCount ?? 0,
-          showSizeChanger: true,
-        }}
-        scroll={{ x: 'max-content' }}
-        size="small"
-        bordered
-        onRow={(record) => ({
-          onClick: () => setDetailOrderId(record.id),
-          style: { cursor: 'pointer' },
-        })}
-        onChange={(pagination) => {
-          if (pagination.current !== page) setPage(pagination.current ?? 1);
-          if (pagination.pageSize !== pageSize) {
-            setPageSize(pagination.pageSize ?? 20);
-            setPage(1);
-          }
-        }}
-        rowClassName={(record) => {
-          if (record.status === OrderStatus.Completed) return 'master-row-completed';
-          if (record.status === OrderStatus.Cancelled) return 'master-row-cancelled';
-          return '';
-        }}
-      />
+      <div ref={tableWrapperRef} style={{ flex: 1, minHeight: 0 }}>
+        <Table<OrderMasterViewDto>
+          className="master-table"
+          columns={masterColumns}
+          dataSource={masterResult?.items}
+          rowKey="id"
+          loading={isLoading}
+          pagination={{
+            current: page,
+            pageSize,
+            total: masterResult?.totalCount ?? 0,
+            showSizeChanger: true,
+          }}
+          scroll={{ x: 'max-content', y: tableBodyHeight }}
+          size="small"
+          bordered
+          onRow={(record) => ({
+            onClick: () => setDetailOrderId(record.id),
+            style: { cursor: 'pointer' },
+          })}
+          onChange={(pagination) => {
+            if (pagination.current !== page) setPage(pagination.current ?? 1);
+            if (pagination.pageSize !== pageSize) {
+              const newSize = pagination.pageSize ?? 20;
+              setPageSize(newSize);
+              localStorage.setItem('orders-pageSize', String(newSize));
+              setPage(1);
+            }
+          }}
+          rowClassName={(record) => {
+            if (record.status === OrderStatus.Completed) return 'master-row-completed';
+            if (record.status === OrderStatus.Cancelled) return 'master-row-cancelled';
+            return '';
+          }}
+        />
+      </div>
 
       <style>{`
         .master-table .master-row-completed td {
@@ -750,7 +780,7 @@ export function OrderListPage() {
               {t('common:actions.save')}
             </Button>
           ) : detailOrder && detailOrder.status === OrderStatus.Draft && user?.role !== UserRole.SalesManager ? (
-            <Button type="primary" size="small" loading={isSaving} onClick={async () => {
+            <Button type="primary" loading={isSaving} onClick={async () => {
               try {
                 const values = await editForm.validateFields();
                 setIsSaving(true);
@@ -817,8 +847,8 @@ export function OrderListPage() {
 
               <Row gutter={12}>
                 <Col span={8}>
-                  <Form.Item name="priority" label={t('common:labels.priority')} rules={[{ required: true }, { type: 'number', min: 1, message: t('common:errors.INVALID_PRIORITY') }]} initialValue={1}>
-                    <InputNumber min={1} max={100} precision={0} style={{ width: '100%' }} />
+                  <Form.Item name="priority" label={t('common:labels.priority')} rules={[{ required: true }, { type: 'number', min: 1, message: t('common:errors.INVALID_PRIORITY') }]}>
+                    <InputNumber min={1} max={100000} precision={0} style={{ width: '100%' }} />
                   </Form.Item>
                 </Col>
                 <Col span={16}>
@@ -882,7 +912,6 @@ export function OrderListPage() {
                   setCreatePendingItems((prev) => [...prev, values as AddOrderItemRequest]);
                   itemForm.resetFields();
                   itemForm.setFieldsValue({ quantity: 1 });
-                  setAddingItem(false);
                 }}>
                   <Row gutter={12}>
                     <Col span={12}>
@@ -910,7 +939,9 @@ export function OrderListPage() {
                   </Row>
                   <Space style={{ marginBottom: 12 }}>
                     <Button type="primary" onClick={() => itemForm.submit()}>{t('orders.addItem')}</Button>
-                    <Button onClick={() => { setAddingItem(false); itemForm.resetFields(); }}>{t('common:actions.cancel')}</Button>
+                    {createPendingItems.length > 0 && (
+                      <Button onClick={() => { setAddingItem(false); itemForm.resetFields(); }}>{t('common:actions.done')}</Button>
+                    )}
                   </Space>
                 </Form>
                 <Divider style={{ margin: '8px 0' }} />
@@ -1094,6 +1125,21 @@ export function OrderListPage() {
                       <Button size="small" danger loading={cancelOrder.isPending}>{t('orders.cancelOrder')}</Button>
                     </Popconfirm>
                   )}
+                  {detailOrder.status === OrderStatus.Cancelled && (
+                    <Popconfirm
+                      title={t('orders.reopenConfirm')}
+                      okText={t('common:actions.confirm')}
+                      cancelText={t('common:actions.no')}
+                      onConfirm={() => {
+                        reopenOrder.mutate(detailOrder.id, {
+                          onSuccess: () => message.success(t('orders.reopenedSuccess')),
+                          onError: (err) => message.error(getTranslatedError(err, t, t('orders.reopenFailed'))),
+                        });
+                      }}
+                    >
+                      <Button size="small" type="primary" loading={reopenOrder.isPending} icon={<UndoOutlined />}>{t('orders.reopenOrder')}</Button>
+                    </Popconfirm>
+                  )}
                 </Space>
               )}
             </div>
@@ -1106,7 +1152,7 @@ export function OrderListPage() {
                   <Space size={4}>
                     <InputNumber
                       min={1}
-                      max={100}
+                      max={100000}
                       precision={0}
                       value={localPriority}
                       style={{ width: 80 }}
@@ -1349,6 +1395,7 @@ export function OrderListPage() {
                         {item.notes}
                       </Text>
                     )}
+                    <OrderAttachments orderId={detailOrder.id} orderItemId={item.id} />
                   </div>
                 );
               })}

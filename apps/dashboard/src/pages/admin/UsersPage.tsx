@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { useTableHeight } from '../../hooks/useTableHeight';
 import { Typography, Table, Button, Drawer, Form, Input, Select, Tag, App, Switch, DatePicker } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
 
@@ -43,6 +44,8 @@ export function UsersPage() {
   const { message } = App.useApp();
   const { t } = useTranslation('dashboard');
   const { tEnum } = useEnumTranslation();
+
+  const { ref: tableWrapperRef, height: tableBodyHeight } = useTableHeight();
 
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebounce(search, 400);
@@ -178,7 +181,7 @@ export function UsersPage() {
   ];
 
   return (
-    <div>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>{t('admin.users.title')}</Title>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
@@ -229,24 +232,26 @@ export function UsersPage() {
         />
       </div>
 
-      <Table
-        columns={columns}
-        dataSource={data}
-        rowKey="id"
-        loading={isLoading}
-        scroll={{ x: 'max-content' }}
-        pagination={{
-          current: page,
-          pageSize,
-          total: pagedResult?.totalCount,
-          onChange: (p, ps) => { setPage(p); setPageSize(ps); },
-          showSizeChanger: true,
-        }}
-        onRow={(record) => ({
-          onClick: () => openEdit(record),
-          style: { cursor: 'pointer' },
-        })}
-      />
+      <div ref={tableWrapperRef} style={{ flex: 1, minHeight: 0 }}>
+        <Table
+          columns={columns}
+          dataSource={data}
+          rowKey="id"
+          loading={isLoading}
+          scroll={{ x: 'max-content', y: tableBodyHeight }}
+          pagination={{
+            current: page,
+            pageSize,
+            total: pagedResult?.totalCount,
+            onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+            showSizeChanger: true,
+          }}
+          onRow={(record) => ({
+            onClick: () => openEdit(record),
+            style: { cursor: 'pointer' },
+          })}
+        />
+      </div>
 
       {/* Create User Drawer */}
       <Drawer

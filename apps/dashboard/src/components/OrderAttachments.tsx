@@ -23,9 +23,10 @@ function isImage(contentType: string): boolean {
 
 interface OrderAttachmentsProps {
   orderId: string;
+  orderItemId?: string;
 }
 
-export function OrderAttachments({ orderId }: OrderAttachmentsProps) {
+export function OrderAttachments({ orderId, orderItemId }: OrderAttachmentsProps) {
   const tenantId = useAuthStore((s) => s.tenantId);
   const user = useAuthStore((s) => s.user);
   const queryClient = useQueryClient();
@@ -42,18 +43,18 @@ export function OrderAttachments({ orderId }: OrderAttachmentsProps) {
     user?.role === UserRole.Admin;
 
   const { data: attachments = [], isLoading } = useQuery({
-    queryKey: ['order-attachments', orderId],
-    queryFn: () => ordersApi.getAttachments(orderId).then((r) => r.data),
+    queryKey: ['order-attachments', orderId, orderItemId ?? 'order'],
+    queryFn: () => ordersApi.getAttachments(orderId, orderItemId).then((r) => r.data),
     enabled: !!orderId,
   });
 
   const uploadMutation = useMutation({
     mutationFn: async (file: File) => {
       const compressed = await compressFile(file);
-      return ordersApi.uploadAttachment(orderId, compressed, tenantId!).then((r) => r.data);
+      return ordersApi.uploadAttachment(orderId, compressed, tenantId!, orderItemId).then((r) => r.data);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['order-attachments', orderId] });
+      queryClient.invalidateQueries({ queryKey: ['order-attachments', orderId, orderItemId ?? 'order'] });
       message.success(t('attachments.uploaded'));
     },
     onError: (err: unknown) => {
@@ -67,7 +68,7 @@ export function OrderAttachments({ orderId }: OrderAttachmentsProps) {
     mutationFn: (attachmentId: string) =>
       ordersApi.deleteAttachment(orderId, attachmentId, tenantId!),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['order-attachments', orderId] });
+      queryClient.invalidateQueries({ queryKey: ['order-attachments', orderId, orderItemId ?? 'order'] });
       message.success(t('attachments.deleted'));
     },
     onError: () => {

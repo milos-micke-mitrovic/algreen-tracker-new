@@ -41,7 +41,7 @@ export function MainLayout() {
   }, [tenantId]);
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
+    <Layout style={{ height: '100vh', overflow: 'hidden' }}>
       <Sider
         collapsible
         collapsed={collapsed}
@@ -68,7 +68,7 @@ export function MainLayout() {
         </div>
         <SidebarMenu collapsed={collapsed} />
       </Sider>
-      <Layout>
+      <Layout style={{ overflow: 'hidden' }}>
         <AppHeader />
         <Content
           style={{
@@ -76,7 +76,9 @@ export function MainLayout() {
             padding: 24,
             background: themeToken.colorBgContainer,
             borderRadius: themeToken.borderRadius,
-            minHeight: 280,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'auto',
           }}
         >
           <ConnectionAlert />

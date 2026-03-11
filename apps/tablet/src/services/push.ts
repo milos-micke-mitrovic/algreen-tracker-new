@@ -80,7 +80,10 @@ export async function unsubscribeFromPush(): Promise<void> {
   try {
     if (!('serviceWorker' in navigator)) return;
 
-    const registration = await navigator.serviceWorker.ready;
+    const registration = await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('SW timeout')), 3000)),
+    ]);
     const subscription = await registration.pushManager.getSubscription();
     if (!subscription) return;
 

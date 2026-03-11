@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useTableHeight } from '../../hooks/useTableHeight';
 import {
   Typography, Table, Button, Drawer, Form, Input, Tag, App,
   Select, InputNumber, Divider, Popconfirm, DatePicker,
@@ -12,7 +13,17 @@ function useDebounce<T>(value: T, delay: number): T {
   }, [value, delay]);
   return debounced;
 }
-import { PlusOutlined, DeleteOutlined } from '@ant-design/icons';
+import { PlusOutlined, DeleteOutlined, HolderOutlined } from '@ant-design/icons';
+import {
+  DndContext, closestCenter, PointerSensor, useSensor, useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext, verticalListSortingStrategy, useSortable,
+  arrayMove,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import React from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { productCategoriesApi, processesApi } from '@algreen/api-client';
 import { useAuthStore } from '@algreen/auth';
@@ -40,6 +51,41 @@ function getTranslatedError(error: unknown, t: (key: string, opts?: Record<strin
   return resp?.message || fallback;
 }
 
+const DragHandleContext = React.createContext<ReturnType<typeof useSortable>['listeners']>(undefined);
+
+interface SortableRowProps extends React.HTMLAttributes<HTMLTableRowElement> {
+  'data-row-key'?: string;
+}
+
+function SortableRow(props: SortableRowProps) {
+  const id = props['data-row-key'] ?? '';
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+
+  const style: React.CSSProperties = {
+    ...props.style,
+    transform: CSS.Translate.toString(transform),
+    transition,
+    ...(isDragging ? { position: 'relative', zIndex: 99 } : {}),
+  };
+
+  return (
+    <DragHandleContext.Provider value={listeners}>
+      <tr {...props} ref={setNodeRef} style={style} {...attributes} />
+    </DragHandleContext.Provider>
+  );
+}
+
+function DragHandle() {
+  const listeners = React.useContext(DragHandleContext);
+  return (
+    <HolderOutlined
+      style={{ color: '#999', cursor: 'grab' }}
+      {...listeners}
+      onClick={(e) => e.stopPropagation()}
+    />
+  );
+}
+
 interface LocalProcess { processId: string; sequenceOrder: number; defaultComplexity?: ComplexityType }
 interface LocalDep { processId: string; dependsOnProcessId: string }
 
@@ -51,6 +97,10 @@ export function ProductCategoriesPage() {
   const [form] = Form.useForm();
   const { message } = App.useApp();
   const { t } = useTranslation('dashboard');
+
+  const { ref: tableWrapperRef, height: tableBodyHeight } = useTableHeight();
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
   // ─── Filter & Pagination State ──────────────────────────
   const [search, setSearch] = useState('');
@@ -124,12 +174,16 @@ export function ProductCategoriesPage() {
   // ─── Seed local state from detail when editing ─────────────
   useEffect(() => {
     if (detail) {
-      form.setFieldsValue({ name: detail.name, description: detail.description });
-      setLocalProcesses(detail.processes.map((p) => ({
-        processId: p.processId,
-        sequenceOrder: p.sequenceOrder,
-        defaultComplexity: p.defaultComplexity ?? undefined,
-      })));
+      form.setFieldsValue({ name: detail.name, description: detail.description, defaultWarningDays: detail.defaultWarningDays, defaultCriticalDays: detail.defaultCriticalDays });
+      setLocalProcesses(
+        [...detail.processes]
+          .sort((a, b) => a.sequenceOrder - b.sequenceOrder)
+          .map((p) => ({
+            processId: p.processId,
+            sequenceOrder: p.sequenceOrder,
+            defaultComplexity: p.defaultComplexity ?? undefined,
+          }))
+      );
       setLocalDeps(detail.dependencies.map((d) => ({
         processId: d.processId,
         dependsOnProcessId: d.dependsOnProcessId,
@@ -143,11 +197,13 @@ export function ProductCategoriesPage() {
   };
 
   const createMutation = useMutation({
-    mutationFn: (values: { name: string; description?: string }) =>
+    mutationFn: (values: { name: string; description?: string; defaultWarningDays?: number; defaultCriticalDays?: number }) =>
       productCategoriesApi.create({
         tenantId: tenantId!,
         name: values.name,
         description: values.description,
+        defaultWarningDays: values.defaultWarningDays,
+        defaultCriticalDays: values.defaultCriticalDays,
         processes: localProcesses,
         dependencies: localDeps,
       }),
@@ -163,10 +219,12 @@ export function ProductCategoriesPage() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: (values: { name: string; description?: string }) =>
+    mutationFn: (values: { name: string; description?: string; defaultWarningDays?: number; defaultCriticalDays?: number }) =>
       productCategoriesApi.update(detailId!, {
         name: values.name,
         description: values.description,
+        defaultWarningDays: values.defaultWarningDays,
+        defaultCriticalDays: values.defaultCriticalDays,
         processes: localProcesses,
         dependencies: localDeps,
       }),
@@ -231,10 +289,25 @@ export function ProductCategoriesPage() {
   });
 
   // ─── Inline add/remove handlers ────────────────────────────
+  const nextProcOrder = localProcesses.length > 0 ? Math.max(...localProcesses.map((p) => p.sequenceOrder)) + 1 : 1;
+
   const handleAddProcess = () => {
-    if (!addProcId || !addProcOrder) return;
-    setLocalProcesses((prev) => [...prev, { processId: addProcId, sequenceOrder: addProcOrder, defaultComplexity: addProcComplexity }]);
+    if (!addProcId) return;
+    const order = addProcOrder ?? nextProcOrder;
+    setLocalProcesses((prev) => [...prev, { processId: addProcId, sequenceOrder: order, defaultComplexity: addProcComplexity }]);
     resetAddProcess();
+  };
+
+  const handleProcessDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    setLocalProcesses((prev) => {
+      const oldIndex = prev.findIndex((p) => p.processId === active.id);
+      const newIndex = prev.findIndex((p) => p.processId === over.id);
+      if (oldIndex === -1 || newIndex === -1) return prev;
+      const reordered = arrayMove(prev, oldIndex, newIndex);
+      return reordered.map((p, i) => ({ ...p, sequenceOrder: i + 1 }));
+    });
   };
 
   const handleRemoveProcess = (processId: string) => {
@@ -296,28 +369,37 @@ export function ProductCategoriesPage() {
       <Title level={5} style={{ marginBottom: 12 }}>
         {t('admin.productCategories.processes', { count: displayProcesses.length })}
       </Title>
-      <Table<ProductCategoryProcessDto>
-        dataSource={displayProcesses}
-        rowKey="id"
-        size="small"
-        pagination={false}
-        columns={[
-          { title: t('common:labels.process'), render: (_, r) => `${r.processCode} — ${r.processName}` },
-          { title: t('common:labels.order'), dataIndex: 'sequenceOrder', width: 80, align: 'center' },
-          {
-            title: t('admin.productCategories.defaultComplexity'),
-            dataIndex: 'defaultComplexity',
-            width: 120,
-            render: (v: ComplexityType | null) => v ? <Tag>{t(`common:enums.ComplexityType.${v}`)}</Tag> : '—',
-          },
-          {
-            title: '', width: 50,
-            render: (_, r) => (
-              <Button type="text" danger icon={<DeleteOutlined />} size="small" onClick={() => handleRemoveProcess(r.processId)} />
-            ),
-          },
-        ]}
-      />
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleProcessDragEnd}>
+        <SortableContext items={displayProcesses.map((p) => p.processId)} strategy={verticalListSortingStrategy}>
+          <Table<ProductCategoryProcessDto>
+            dataSource={displayProcesses}
+            rowKey="processId"
+            size="small"
+            pagination={false}
+            components={{ body: { row: SortableRow } }}
+            columns={[
+              {
+                title: '', dataIndex: 'dragHandle', width: 40,
+                render: () => <DragHandle />,
+              },
+              { title: t('common:labels.process'), render: (_, r) => `${r.processCode} — ${r.processName}` },
+              { title: t('common:labels.order'), dataIndex: 'sequenceOrder', width: 80, align: 'center' },
+              {
+                title: t('admin.productCategories.defaultComplexity'),
+                dataIndex: 'defaultComplexity',
+                width: 120,
+                render: (v: ComplexityType | null) => v ? <Tag>{t(`common:enums.ComplexityType.${v}`)}</Tag> : '—',
+              },
+              {
+                title: '', width: 50,
+                render: (_, r) => (
+                  <Button type="text" danger icon={<DeleteOutlined />} size="small" onClick={() => handleRemoveProcess(r.processId)} />
+                ),
+              },
+            ]}
+          />
+        </SortableContext>
+      </DndContext>
       {availableProcesses.length > 0 && (
         <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
           <Select
@@ -329,7 +411,7 @@ export function ProductCategoriesPage() {
           />
           <InputNumber
             min={1} precision={0}
-            placeholder={t('common:labels.order')}
+            placeholder={String(nextProcOrder)}
             value={addProcOrder}
             onChange={(v) => setAddProcOrder(v ?? undefined)}
             style={{ width: 80 }}
@@ -342,7 +424,7 @@ export function ProductCategoriesPage() {
             style={{ width: 110 }}
             options={Object.values(ComplexityType).map((c) => ({ value: c, label: t(`common:enums.ComplexityType.${c}`) }))}
           />
-          <Button type="dashed" icon={<PlusOutlined />} onClick={handleAddProcess} disabled={!addProcId || !addProcOrder}>
+          <Button type="dashed" icon={<PlusOutlined />} onClick={handleAddProcess} disabled={!addProcId}>
             {t('common:actions.add')}
           </Button>
         </div>
@@ -401,7 +483,7 @@ export function ProductCategoriesPage() {
 
   // ─── Render ───────────────────────────────────────────
   return (
-    <div>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>{t('admin.productCategories.title')}</Title>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); clearLocal(); setIsCreating(true); }}>
@@ -444,21 +526,23 @@ export function ProductCategoriesPage() {
         />
       </div>
 
-      <Table
-        columns={columns}
-        dataSource={pagedResult?.items}
-        rowKey="id"
-        loading={isLoading}
-        scroll={{ x: 'max-content' }}
-        pagination={{
-          current: page,
-          pageSize,
-          total: pagedResult?.totalCount,
-          onChange: (p, ps) => { setPage(p); setPageSize(ps); },
-          showSizeChanger: true,
-        }}
-        onRow={(record) => ({ onClick: () => setDetailId(record.id), style: { cursor: 'pointer' } })}
-      />
+      <div ref={tableWrapperRef} style={{ flex: 1, minHeight: 0 }}>
+        <Table
+          columns={columns}
+          dataSource={pagedResult?.items}
+          rowKey="id"
+          loading={isLoading}
+          scroll={{ x: 'max-content', y: tableBodyHeight }}
+          pagination={{
+            current: page,
+            pageSize,
+            total: pagedResult?.totalCount,
+            onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+            showSizeChanger: true,
+          }}
+          onRow={(record) => ({ onClick: () => setDetailId(record.id), style: { cursor: 'pointer' } })}
+        />
+      </div>
 
       <Drawer
         title={isCreating ? t('admin.productCategories.createCategory') : (detail?.name ?? '')}
@@ -512,6 +596,14 @@ export function ProductCategoriesPage() {
               <Form.Item name="description" label={t('common:labels.description')}>
                 <Input.TextArea rows={2} />
               </Form.Item>
+              <div style={{ display: 'flex', gap: 16 }}>
+                <Form.Item name="defaultWarningDays" label={t('admin.productCategories.warningDays')} style={{ flex: 1 }}>
+                  <InputNumber min={1} precision={0} style={{ width: '100%' }} placeholder="5" />
+                </Form.Item>
+                <Form.Item name="defaultCriticalDays" label={t('admin.productCategories.criticalDays')} style={{ flex: 1 }}>
+                  <InputNumber min={1} precision={0} style={{ width: '100%' }} placeholder="3" />
+                </Form.Item>
+              </div>
             </Form>
             {processesSection}
             {dependenciesSection}

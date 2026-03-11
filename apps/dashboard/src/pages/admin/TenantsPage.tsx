@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useTableHeight } from '../../hooks/useTableHeight';
 import {
   Typography, Table, Button, Drawer, Form, Input, InputNumber, Tag, App,
   Divider, ColorPicker, Popconfirm, Spin, Select, DatePicker,
@@ -47,6 +48,8 @@ export function TenantsPage() {
   const [form] = Form.useForm();
   const { message } = App.useApp();
   const { t } = useTranslation('dashboard');
+
+  const { ref: tableWrapperRef, height: tableBodyHeight } = useTableHeight();
 
   // ─── Filter & Pagination State ──────────────────────────
   const [search, setSearch] = useState('');
@@ -203,7 +206,7 @@ export function TenantsPage() {
   ];
 
   return (
-    <div>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>{t('admin.tenants.title')}</Title>
         <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
@@ -246,24 +249,26 @@ export function TenantsPage() {
         />
       </div>
 
-      <Table
-        columns={columns}
-        dataSource={data}
-        rowKey="id"
-        loading={isLoading}
-        scroll={{ x: 'max-content' }}
-        pagination={{
-          current: page,
-          pageSize,
-          total: pagedResult?.totalCount,
-          onChange: (p, ps) => { setPage(p); setPageSize(ps); },
-          showSizeChanger: true,
-        }}
-        onRow={(record) => ({
-          onClick: () => openEdit(record),
-          style: { cursor: 'pointer' },
-        })}
-      />
+      <div ref={tableWrapperRef} style={{ flex: 1, minHeight: 0 }}>
+        <Table
+          columns={columns}
+          dataSource={data}
+          rowKey="id"
+          loading={isLoading}
+          scroll={{ x: 'max-content', y: tableBodyHeight }}
+          pagination={{
+            current: page,
+            pageSize,
+            total: pagedResult?.totalCount,
+            onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+            showSizeChanger: true,
+          }}
+          onRow={(record) => ({
+            onClick: () => openEdit(record),
+            style: { cursor: 'pointer' },
+          })}
+        />
+      </div>
 
       <Drawer
         title={isCreating ? t('admin.tenants.createTenant') : currentDetail?.name}
