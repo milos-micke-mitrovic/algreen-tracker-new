@@ -38,6 +38,7 @@
     "notes": "Napomene",
     "role": "Uloga",
     "order": "Redosled",
+    "orderNumber": "Narudžbina",
     "items": "Stavke",
     "deliveryDate": "Datum isporuke",
     "firstName": "Ime",

@@ -28,7 +28,7 @@ export function useOrder(id: string | undefined) {
 export function useCreateOrder() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (data: CreateOrderRequest & { attachments?: File[] }) => ordersApi.create(data).then((r) => r.data),
+    mutationFn: (data: CreateOrderRequest & { attachments?: File[]; itemAttachments?: Map<number, File[]> }) => ordersApi.create(data).then((r) => r.data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['orders'] });
       queryClient.invalidateQueries({ queryKey: ['orders-master-view'] });

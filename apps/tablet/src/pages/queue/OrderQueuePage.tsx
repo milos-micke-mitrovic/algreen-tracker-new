@@ -99,6 +99,7 @@ export function OrderQueuePage() {
           items.push({
             orderItemProcessId: w.orderItemProcessId,
             orderId: w.orderId,
+            orderItemId: w.orderItemId,
             orderNumber: w.orderNumber,
             priority: w.priority,
             deliveryDate: w.deliveryDate,
@@ -114,18 +115,27 @@ export function OrderQueuePage() {
         }
       }
     }
-    return items.sort((a, b) => a.priority - b.priority);
+    return items.sort((a, b) => {
+      // In Progress first, then by priority
+      const aInProgress = a.status === ProcessStatus.InProgress ? 0 : 1;
+      const bInProgress = b.status === ProcessStatus.InProgress ? 0 : 1;
+      if (aInProgress !== bInProgress) return aInProgress - bInProgress;
+      return a.priority - b.priority;
+    });
   }, [queue, activeWork]);
 
-  // Auto-expand and highlight item from notification
+  // Auto-expand and highlight item from notification (expand visibleCount if needed)
   useEffect(() => {
     if (highlightId && mergedItems.length) {
-      const match = mergedItems.find(
+      const idx = mergedItems.findIndex(
         (i) => i.orderId === highlightId || i.orderItemProcessId === highlightId,
       );
-      if (match) {
-        setExpandedItemId(match.orderItemProcessId);
-        setHighlightedId(match.orderItemProcessId);
+      if (idx >= 0) {
+        if (idx >= visibleCount) {
+          setVisibleCount(idx + 1);
+        }
+        setExpandedItemId(mergedItems[idx].orderItemProcessId);
+        setHighlightedId(mergedItems[idx].orderItemProcessId);
         const timer = setTimeout(() => setHighlightedId(null), 3000);
         return () => clearTimeout(timer);
       }
@@ -306,7 +316,7 @@ function QueueCard({
         <div className="flex items-center justify-between text-tablet-sm text-gray-600">
           <span>
             {item.productCategoryName && (
-              <span className="text-gray-400 mr-1">{item.productCategoryName} /</span>
+              <span className="inline-block bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded text-tablet-xs font-medium mr-1.5">{item.productCategoryName}</span>
             )}
             {item.productName}
           </span>
@@ -321,7 +331,7 @@ function QueueCard({
             <span className="text-gray-500">
               {t('queue.progress', { completed: item.completedProcessCount, total: item.totalProcessCount })}
             </span>
-            <AttachmentIndicator orderId={item.orderId} />
+            <AttachmentIndicator orderId={item.orderId} orderItemId={item.orderItemId} />
           </div>
           {item.specialRequestNames.length > 0 && (
             <div className="flex flex-wrap gap-1">
@@ -346,7 +356,7 @@ function QueueCard({
             t={t}
             tEnum={tEnum}
           />
-          <AttachmentViewer orderId={item.orderId} />
+          <AttachmentViewer orderId={item.orderId} orderItemId={item.orderItemId} />
         </>
       )}
     </div>
@@ -429,7 +439,7 @@ function WorkPanel({
     mutationFn: () => processWorkflowApi.start(orderItemProcessId, { userId }),
     onSuccess: async () => {
       setError(null);
-      await invalidateAndWait(['tablet-active']);
+      await invalidateAndWait(['tablet-active', 'tablet-queue']);
     },
     onError: (err) => handleError(err, 'work.startFailed'),
   });
@@ -438,7 +448,7 @@ function WorkPanel({
     mutationFn: () => processWorkflowApi.stop(orderItemProcessId, { userId }),
     onSuccess: async () => {
       setError(null);
-      await invalidateAndWait(['tablet-active']);
+      await invalidateAndWait(['tablet-active', 'tablet-queue']);
     },
     onError: (err) => handleError(err, 'work.pauseFailed'),
   });
@@ -447,7 +457,7 @@ function WorkPanel({
     mutationFn: () => processWorkflowApi.resume(orderItemProcessId, { userId }),
     onSuccess: async () => {
       setError(null);
-      await invalidateAndWait(['tablet-active']);
+      await invalidateAndWait(['tablet-active', 'tablet-queue']);
     },
     onError: (err) => handleError(err, 'work.resumeFailed'),
   });
@@ -515,6 +525,15 @@ function WorkPanel({
       {/* Order details */}
       {activeWork && (
         <div className="grid grid-cols-2 gap-2 text-tablet-xs">
+          <div className="flex justify-between items-center bg-gray-50 rounded px-3 py-1.5 col-span-2">
+            <span className="text-gray-500">{t('work.product')}</span>
+            <span className="font-semibold flex items-center gap-1.5">
+              {activeWork.productCategoryName && (
+                <span className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded text-tablet-xs font-medium">{activeWork.productCategoryName}</span>
+              )}
+              {activeWork.productName}
+            </span>
+          </div>
           <div className="flex justify-between bg-gray-50 rounded px-3 py-1.5">
             <span className="text-gray-500">{t('work.priority')}</span>
             <span className="font-semibold">P{activeWork.priority}</span>

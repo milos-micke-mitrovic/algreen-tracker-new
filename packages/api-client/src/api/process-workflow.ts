@@ -37,4 +37,12 @@ export const processWorkflowApi = {
   withdraw(id: string, data: WithdrawProcessRequest) {
     return apiClient.post(`/order-item-processes/${id}/withdraw`, data);
   },
+
+  pauseStation(data: { processId: string; tenantId: string; userId: string }) {
+    return apiClient.post('/order-item-processes/pause-station', data);
+  },
+
+  resumeStation(data: { processId: string; tenantId: string; userId: string }) {
+    return apiClient.post('/order-item-processes/resume-station', data);
+  },
 };

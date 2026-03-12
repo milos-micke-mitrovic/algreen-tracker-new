@@ -19,21 +19,27 @@ function isPdf(contentType: string): boolean {
 
 interface AttachmentViewerProps {
   orderId: string;
+  orderItemId?: string;
 }
 
-export function AttachmentViewer({ orderId }: AttachmentViewerProps) {
+export function AttachmentViewer({ orderId, orderItemId }: AttachmentViewerProps) {
   const [expanded, setExpanded] = useState(false);
   const [viewingAttachment, setViewingAttachment] = useState<OrderAttachmentDto | null>(null);
   const [viewingPdf, setViewingPdf] = useState<OrderAttachmentDto | null>(null);
   const [pdfBlobUrl, setPdfBlobUrl] = useState<string | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
 
-  const { data: attachments = [], isLoading } = useQuery({
+  const { data: allAttachments = [], isLoading } = useQuery({
     queryKey: ['order-attachments', orderId],
     queryFn: () => ordersApi.getAttachments(orderId).then((r) => r.data),
     enabled: !!orderId,
     staleTime: 5 * 60_000,
   });
+
+  // Show order-level attachments + this item's attachments
+  const attachments = orderItemId
+    ? allAttachments.filter((a) => a.orderItemId === null || a.orderItemId === orderItemId)
+    : allAttachments;
 
   if (isLoading) {
     return (

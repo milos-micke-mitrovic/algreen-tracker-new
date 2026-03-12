@@ -38,6 +38,7 @@
     "notes": "Notes",
     "role": "Role",
     "order": "Order",
+    "orderNumber": "Order",
     "items": "Items",
     "deliveryDate": "Delivery Date",
     "firstName": "First Name",

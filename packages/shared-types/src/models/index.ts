@@ -84,6 +84,7 @@ export interface OrderDetailDto {
   customWarningDays: number | null;
   customCriticalDays: number | null;
   items: OrderItemDto[];
+  attachments: OrderAttachmentDto[];
 }
 
 export interface OrderItemDto {
@@ -95,6 +96,7 @@ export interface OrderItemDto {
   notes: string | null;
   processes: OrderItemProcessDto[];
   specialRequests: OrderItemSpecialRequestDto[];
+  attachments: OrderAttachmentDto[];
 }
 
 export interface OrderItemProcessDto {
@@ -384,6 +386,7 @@ export interface OrderAttachmentDto {
 export interface TabletQueueItemDto {
   orderItemProcessId: string;
   orderId: string;
+  orderItemId: string;
   orderNumber: string;
   priority: number;
   deliveryDate: string;
@@ -400,6 +403,7 @@ export interface TabletQueueItemDto {
 export interface TabletActiveWorkDto {
   orderItemProcessId: string;
   orderId: string;
+  orderItemId: string;
   orderNumber: string;
   priority: number;
   deliveryDate: string;
@@ -430,6 +434,7 @@ export interface TabletSubProcessDto {
 export interface TabletIncomingDto {
   orderItemProcessId: string;
   orderId: string;
+  orderItemId: string;
   orderNumber: string;
   priority: number;
   deliveryDate: string;

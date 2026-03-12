@@ -43,6 +43,7 @@
     "pauseFailed": "Failed to pause process",
     "resumeFailed": "Failed to resume process",
     "completeFailed": "Failed to complete process",
+    "product": "Product",
     "priority": "Priority",
     "deliveryDate": "Delivery",
     "quantity": "Quantity",

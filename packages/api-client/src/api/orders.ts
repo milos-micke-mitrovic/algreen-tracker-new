@@ -35,7 +35,7 @@ export const ordersApi = {
     return apiClient.get<OrderDetailDto>(`/orders/${id}`);
   },
 
-  create(data: CreateOrderRequest & { attachments?: File[] }) {
+  create(data: CreateOrderRequest & { attachments?: File[]; itemAttachments?: Map<number, File[]> }) {
     const formData = new FormData();
     formData.append('TenantId', data.tenantId);
     formData.append('OrderNumber', data.orderNumber);
@@ -53,6 +53,13 @@ export const ordersApi = {
         if (item.notes) formData.append(`Items[${i}].Notes`, item.notes);
       });
     }
+    // Per-item attachments
+    if (data.itemAttachments) {
+      data.itemAttachments.forEach((files, itemIndex) => {
+        files.forEach((file) => formData.append(`Items[${itemIndex}].Attachments`, file));
+      });
+    }
+    // Order-level attachments
     if (data.attachments) {
       data.attachments.forEach((file) => formData.append('Attachments', file));
     }

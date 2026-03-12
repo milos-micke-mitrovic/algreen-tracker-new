@@ -43,6 +43,7 @@
     "pauseFailed": "Pauziranje procesa nije uspelo",
     "resumeFailed": "Nastavljanje procesa nije uspelo",
     "completeFailed": "Završavanje procesa nije uspelo",
+    "product": "Proizvod",
     "priority": "Prioritet",
     "deliveryDate": "Isporuka",
     "quantity": "Količina",

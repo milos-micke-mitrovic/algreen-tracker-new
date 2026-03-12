@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@algreen/auth';
+import { processWorkflowApi } from '@algreen/api-client';
 import { BigButton } from '../../components/BigButton';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useTranslation, useEnumTranslation } from '@algreen/i18n';
@@ -10,15 +11,26 @@ import { unsubscribeFromPush } from '../../services/push';
 export function CheckOutPage() {
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
+  const tenantId = useAuthStore((s) => s.tenantId);
   const logout = useAuthStore((s) => s.logout);
   const clearWorkSession = useWorkSessionStore((s) => s.clear);
+  const processId = useWorkSessionStore((s) => s.processId);
   const processName = useWorkSessionStore((s) => s.processName);
   const checkInTime = useWorkSessionStore((s) => s.checkInTime);
   const { t } = useTranslation('tablet');
   const { tEnum } = useEnumTranslation();
   const [showConfirm, setShowConfirm] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    setIsLoading(true);
+    try {
+      if (user?.id && processId && tenantId) {
+        await processWorkflowApi.pauseStation({ processId, tenantId, userId: user.id });
+      }
+    } catch {
+      // Still proceed with logout even if pause fails
+    }
     unsubscribeFromPush().catch(() => {});
     clearWorkSession();
     logout();
@@ -62,10 +74,10 @@ export function CheckOutPage() {
         <BigButton
           variant="danger"
           onClick={() => setShowConfirm(true)}
+          loading={isLoading}
         >
           {t('checkout.checkOut')}
         </BigButton>
-
       </div>
 
       <ConfirmDialog
@@ -75,6 +87,7 @@ export function CheckOutPage() {
         confirmLabel={t('checkout.checkOut')}
         cancelLabel={t('common:actions.cancel')}
         variant="danger"
+        loading={isLoading}
         onConfirm={handleLogout}
         onCancel={() => setShowConfirm(false)}
       />

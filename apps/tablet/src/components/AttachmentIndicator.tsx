@@ -1,13 +1,17 @@
 import { useQuery } from '@tanstack/react-query';
 import { ordersApi } from '@algreen/api-client';
 
-export function AttachmentIndicator({ orderId }: { orderId: string }) {
-  const { data: attachments } = useQuery({
+export function AttachmentIndicator({ orderId, orderItemId }: { orderId: string; orderItemId?: string }) {
+  const { data: allAttachments } = useQuery({
     queryKey: ['order-attachments', orderId],
     queryFn: () => ordersApi.getAttachments(orderId).then((r) => r.data),
     enabled: !!orderId,
     staleTime: 5 * 60_000,
   });
+
+  const attachments = orderItemId
+    ? allAttachments?.filter((a) => a.orderItemId === null || a.orderItemId === orderItemId)
+    : allAttachments;
 
   if (!attachments?.length) return null;
 

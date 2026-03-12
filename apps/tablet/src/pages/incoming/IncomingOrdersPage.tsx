@@ -28,15 +28,18 @@ export function IncomingOrdersPage() {
     refetchInterval: 60_000,
   });
 
-  // Auto-expand and highlight item from notification
+  // Auto-expand and highlight item from notification (expand visibleCount if needed)
   useEffect(() => {
     if (highlightId && incoming) {
-      const match = incoming.find(
+      const idx = incoming.findIndex(
         (i) => i.orderId === highlightId || i.orderItemProcessId === highlightId,
       );
-      if (match) {
-        setExpandedItemId(match.orderItemProcessId);
-        setHighlightedId(match.orderItemProcessId);
+      if (idx >= 0) {
+        if (idx >= visibleCount) {
+          setVisibleCount(idx + 1);
+        }
+        setExpandedItemId(incoming[idx].orderItemProcessId);
+        setHighlightedId(incoming[idx].orderItemProcessId);
         const timer = setTimeout(() => setHighlightedId(null), 3000);
         return () => clearTimeout(timer);
       }
@@ -187,6 +190,7 @@ function IncomingCard({
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
             <span className="text-tablet-lg font-bold">{item.orderNumber}</span>
+            <span className="text-tablet-sm text-gray-500 font-medium">— {item.productName}</span>
             <span className="bg-primary-500 text-white px-2 py-0.5 rounded-full text-tablet-xs font-medium">
               P{item.priority}
             </span>
@@ -223,7 +227,7 @@ function IncomingCard({
             <span className="text-gray-500">
               {t('queue.progress', { completed: item.completedProcessCount, total: item.totalProcessCount })}
             </span>
-            <AttachmentIndicator orderId={item.orderId} />
+            <AttachmentIndicator orderId={item.orderId} orderItemId={item.orderItemId} />
           </div>
           {item.specialRequestNames.length > 0 && (
             <div className="flex flex-wrap gap-1">
@@ -282,7 +286,7 @@ function IncomingCard({
             </div>
           )}
 
-          <AttachmentViewer orderId={item.orderId} />
+          <AttachmentViewer orderId={item.orderId} orderItemId={item.orderItemId} />
         </div>
       )}
     </div>

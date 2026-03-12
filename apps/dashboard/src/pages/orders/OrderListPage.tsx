@@ -3,9 +3,9 @@ import { useSearchParams } from 'react-router-dom';
 import {
   Typography, Table, Button, Space, Select, Tag, Drawer, Form, Input,
   InputNumber, DatePicker, App, Row, Col, Spin, Popconfirm, Divider,
-  Tooltip, Progress, Statistic, Upload, List,
+  Tooltip, Progress, Statistic, Upload, List, Modal, Card,
 } from 'antd';
-import { PlusOutlined, DeleteOutlined, CheckOutlined, PaperClipOutlined, UndoOutlined, UploadOutlined } from '@ant-design/icons';
+import { PlusOutlined, DeleteOutlined, CheckOutlined, PaperClipOutlined, UndoOutlined, UploadOutlined, CloseCircleOutlined, FilePdfOutlined, EyeOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { useAuthStore } from '@algreen/auth';
 import { OrderStatus, OrderType, ProcessStatus, ComplexityType, UserRole } from '@algreen/shared-types';
@@ -17,7 +17,7 @@ import {
 import { productCategoriesApi, processesApi, ordersApi, specialRequestTypesApi } from '@algreen/api-client';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { StatusBadge } from '../../components/StatusBadge';
-import { OrderAttachments } from '../../components/OrderAttachments';
+import { OrderAttachments, type OrderAttachmentsHandle } from '../../components/OrderAttachments';
 import { compressFile } from '../../utils/compressImage';
 import { useTableHeight } from '../../hooks/useTableHeight';
 import { useTranslation, useEnumTranslation } from '@algreen/i18n';
@@ -371,12 +371,26 @@ export function OrderListPage() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [addingItem, setAddingItem] = useState(false);
   const [createPendingItems, setCreatePendingItems] = useState<AddOrderItemRequest[]>([]);
-  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<Map<number, File[]>>(new Map()); // key: item index, -1 for order-level
+  const [pendingPreview, setPendingPreview] = useState<string | null>(null); // blob URL for image/PDF preview
+  const [pendingPreviewType, setPendingPreviewType] = useState<'image' | 'pdf'>('image');
+
+  const openPendingPreview = useCallback((file: File) => {
+    const url = URL.createObjectURL(file);
+    if (file.type === 'application/pdf') {
+      setPendingPreviewType('pdf');
+      setPendingPreview(url + '#toolbar=0&navpanes=0');
+    } else {
+      setPendingPreviewType('image');
+      setPendingPreview(url);
+    }
+  }, []);
 
   const { ref: tableWrapperRef, height: tableBodyHeight } = useTableHeight();
 
   const [localPriority, setLocalPriority] = useState<number | null>(null);
   const priorityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attachmentRefsMap = useRef<Map<string, OrderAttachmentsHandle>>(new Map());
   const [form] = Form.useForm();
   const [editForm] = Form.useForm();
   const [itemForm] = Form.useForm();
@@ -496,8 +510,16 @@ export function OrderListPage() {
 
   const onCreateFinish = async (values: Record<string, unknown>) => {
     try {
-      // Compress image files before upload
-      const compressedFiles = await Promise.all(pendingFiles.map((f) => compressFile(f)));
+      // Compress order-level attachments
+      const orderFiles = pendingFiles.get(-1) ?? [];
+      const compressedOrderFiles = await Promise.all(orderFiles.map((f) => compressFile(f)));
+      // Compress per-item attachments
+      const compressedItemAttachments = new Map<number, File[]>();
+      for (const [key, files] of pendingFiles.entries()) {
+        if (key === -1) continue; // skip order-level
+        const compressed = await Promise.all(files.map((f) => compressFile(f)));
+        if (compressed.length > 0) compressedItemAttachments.set(key, compressed);
+      }
       await createOrder.mutateAsync({
         tenantId: tenantId!,
         orderNumber: values.orderNumber as string,
@@ -508,12 +530,13 @@ export function OrderListPage() {
         customWarningDays: values.customWarningDays as number | undefined,
         customCriticalDays: values.customCriticalDays as number | undefined,
         items: createPendingItems.length > 0 ? createPendingItems : undefined,
-        attachments: compressedFiles.length > 0 ? compressedFiles : undefined,
+        attachments: compressedOrderFiles.length > 0 ? compressedOrderFiles : undefined,
+        itemAttachments: compressedItemAttachments.size > 0 ? compressedItemAttachments : undefined,
       });
       message.success(t('orders.createdSuccess'));
       form.resetFields();
       setCreatePendingItems([]);
-      setPendingFiles([]);
+      setPendingFiles(new Map());
       setAddingItem(false);
       setIsCreating(false);
     } catch (err) {
@@ -529,7 +552,12 @@ export function OrderListPage() {
         title: t('common:labels.priority'),
         dataIndex: 'priority',
         width: 70,
-        sorter: (a, b) => a.priority - b.priority,
+        sorter: (a, b) => {
+          const aCompleted = a.status === OrderStatus.Completed || a.status === OrderStatus.Cancelled ? 1 : 0;
+          const bCompleted = b.status === OrderStatus.Completed || b.status === OrderStatus.Cancelled ? 1 : 0;
+          if (aCompleted !== bCompleted) return aCompleted - bCompleted;
+          return a.priority - b.priority;
+        },
         defaultSortOrder: 'ascend',
       },
       {
@@ -667,7 +695,7 @@ export function OrderListPage() {
             onClick={() => {
               form.resetFields();
               setCreatePendingItems([]);
-              setPendingFiles([]);
+              setPendingFiles(new Map());
               setAddingItem(true);
               const maxPriority = (masterResult?.items ?? []).reduce((max, o) => Math.max(max, o.priority), 0);
               form.setFieldValue('priority', maxPriority + 10);
@@ -770,7 +798,7 @@ export function OrderListPage() {
         title={isCreating ? t('orders.createOrder') : detailOrder ? t('orders.order', { number: detailOrder.orderNumber }) : ''}
         open={isCreating || !!detailOrderId}
         onClose={() => {
-          if (isCreating) { form.resetFields(); setCreatePendingItems([]); setPendingFiles([]); setAddingItem(false); setIsCreating(false); }
+          if (isCreating) { form.resetFields(); setCreatePendingItems([]); setPendingFiles(new Map()); setAddingItem(false); setIsCreating(false); }
           else { setDetailOrderId(null); clearPendingState(); setAddingItem(false); }
         }}
         width={Math.min(640, window.innerWidth)}
@@ -780,7 +808,8 @@ export function OrderListPage() {
               {t('common:actions.save')}
             </Button>
           ) : detailOrder && detailOrder.status === OrderStatus.Draft && user?.role !== UserRole.SalesManager ? (
-            <Button type="primary" loading={isSaving} onClick={async () => {
+            <Button type="primary" loading={isSaving} disabled={isSaving} onClick={async () => {
+              if (isSaving) return;
               try {
                 const values = await editForm.validateFields();
                 setIsSaving(true);
@@ -802,7 +831,11 @@ export function OrderListPage() {
                       removeSpecialRequests: pendingSpecialRequestRemovals.length > 0 ? pendingSpecialRequestRemovals : undefined,
                     },
                   });
-                  queryClient.invalidateQueries({ queryKey: ['orders', detailOrder.id] });
+                  // Save pending attachment changes (uploads + deletes)
+                  for (const handle of attachmentRefsMap.current.values()) {
+                    if (handle.hasPendingChanges()) await handle.savePending();
+                  }
+                  await queryClient.invalidateQueries({ queryKey: ['orders', detailOrder.id] });
                   queryClient.invalidateQueries({ queryKey: ['orders-master-view'] });
                   clearPendingState();
                   message.success(t('orders.updatedSuccess'));
@@ -939,9 +972,6 @@ export function OrderListPage() {
                   </Row>
                   <Space style={{ marginBottom: 12 }}>
                     <Button type="primary" onClick={() => itemForm.submit()}>{t('orders.addItem')}</Button>
-                    {createPendingItems.length > 0 && (
-                      <Button onClick={() => { setAddingItem(false); itemForm.resetFields(); }}>{t('common:actions.done')}</Button>
-                    )}
                   </Space>
                 </Form>
                 <Divider style={{ margin: '8px 0' }} />
@@ -949,31 +979,110 @@ export function OrderListPage() {
             )}
 
             {/* Item cards */}
-            <div style={{ display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {createPendingItems.map((item, i) => {
                 const cat = (categories ?? []).find((c: ProductCategoryDto) => c.id === item.productCategoryId);
                 return (
-                  <div key={i} style={{ paddingBottom: 12, marginBottom: 12, borderBottom: '1px solid #f0f0f0' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                  <Card
+                    key={i}
+                    size="small"
+                    title={
                       <Space>
                         <Text strong>{item.productName}</Text>
                         <Tag>{t('orders.qty', { count: item.quantity })}</Tag>
                         {cat && <Tag color="blue">{cat.name}</Tag>}
                       </Space>
-                      <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => setCreatePendingItems((prev) => prev.filter((_, idx) => idx !== i))} />
-                    </div>
+                    }
+                    extra={<Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => setCreatePendingItems((prev) => prev.filter((_, idx) => idx !== i))} />}
+                  >
                     {item.notes && (
                       <Text type="secondary" style={{ fontSize: 12 }}>{item.notes}</Text>
                     )}
-                  </div>
+                    {/* Per-item file upload */}
+                    <div style={{ marginTop: 8 }}>
+                      <Text strong style={{ display: 'block', marginBottom: 8 }}>
+                        {t('attachments.title')} ({(pendingFiles.get(i) ?? []).length}/10)
+                      </Text>
+                      <Upload
+                        beforeUpload={(file) => {
+                          if (file.size > 10 * 1024 * 1024) { message.error(t('attachments.fileTooLarge')); return false; }
+                          setPendingFiles((prev) => {
+                            const next = new Map(prev);
+                            const existing = next.get(i) ?? [];
+                            if (existing.length >= 10) return prev;
+                            next.set(i, [...existing, file]);
+                            return next;
+                          });
+                          return false;
+                        }}
+                        showUploadList={false}
+                        accept=".jpg,.jpeg,.png,.pdf"
+                        multiple
+                        disabled={(pendingFiles.get(i) ?? []).length >= 10}
+                      >
+                        <Button icon={<UploadOutlined />} size="small" disabled={(pendingFiles.get(i) ?? []).length >= 10} style={{ marginBottom: 8 }}>
+                          {t('attachments.upload')}
+                        </Button>
+                      </Upload>
+                      <List
+                        size="small"
+                        dataSource={pendingFiles.get(i) ?? []}
+                        locale={{ emptyText: t('attachments.noAttachments') }}
+                        renderItem={(file: File, fi: number) => (
+                          <List.Item
+                            style={{ padding: '4px 0' }}
+                            actions={[
+                              <Button key="preview" type="text" size="small" icon={<EyeOutlined />} onClick={() => openPendingPreview(file)} />,
+                              <Button
+                                key="delete"
+                                type="text"
+                                size="small"
+                                danger
+                                icon={<CloseCircleOutlined />}
+                                onClick={() => {
+                                  setPendingFiles((prev) => {
+                                    const next = new Map(prev);
+                                    const existing = next.get(i) ?? [];
+                                    next.set(i, existing.filter((_, idx) => idx !== fi));
+                                    return next;
+                                  });
+                                }}
+                              />,
+                            ]}
+                          >
+                            <Space size={8}>
+                              {file.type.startsWith('image/') ? (
+                                <img
+                                  src={URL.createObjectURL(file)}
+                                  width={40} height={40}
+                                  style={{ objectFit: 'cover', borderRadius: 4, cursor: 'pointer' }}
+                                  onClick={() => openPendingPreview(file)}
+                                  alt={file.name}
+                                />
+                              ) : (
+                                <FilePdfOutlined style={{ fontSize: 24, color: '#ff4d4f' }} />
+                              )}
+                              <div>
+                                <Text ellipsis style={{ maxWidth: 200 }}>{file.name}</Text>
+                                <br />
+                                <Text type="secondary" style={{ fontSize: 12 }}>
+                                  {file.size < 1024 ? `${file.size} B` : file.size < 1024 * 1024 ? `${(file.size / 1024).toFixed(1)} KB` : `${(file.size / (1024 * 1024)).toFixed(1)} MB`}
+                                </Text>
+                              </div>
+                            </Space>
+                          </List.Item>
+                        )}
+                      />
+                    </div>
+                  </Card>
                 );
               })}
             </div>
 
-            {/* Attachments section (staged locally until order is created) */}
+            {/* Order-level Attachments section */}
             <Divider style={{ margin: '12px 0' }} />
             <Text strong style={{ display: 'block', marginBottom: 8 }}>
-              {t('attachments.title')} ({pendingFiles.length}/10)
+              {t('attachments.title')} ({(pendingFiles.get(-1) ?? []).length}/10)
             </Text>
             <Upload
               beforeUpload={(file) => {
@@ -981,17 +1090,23 @@ export function OrderListPage() {
                   message.error(t('attachments.fileTooLarge'));
                   return false;
                 }
-                setPendingFiles((prev) => [...prev, file]);
+                setPendingFiles((prev) => {
+                  const next = new Map(prev);
+                  const existing = next.get(-1) ?? [];
+                  if (existing.length >= 10) return prev;
+                  next.set(-1, [...existing, file]);
+                  return next;
+                });
                 return false;
               }}
               showUploadList={false}
               accept=".jpg,.jpeg,.png,.pdf"
               multiple
-              disabled={pendingFiles.length >= 10}
+              disabled={(pendingFiles.get(-1) ?? []).length >= 10}
             >
               <Button
                 icon={<UploadOutlined />}
-                disabled={pendingFiles.length >= 10}
+                disabled={(pendingFiles.get(-1) ?? []).length >= 10}
                 size="small"
                 style={{ marginBottom: 8 }}
               >
@@ -1000,24 +1115,40 @@ export function OrderListPage() {
             </Upload>
             <List
               size="small"
-              dataSource={pendingFiles}
+              dataSource={pendingFiles.get(-1) ?? []}
               locale={{ emptyText: t('attachments.noAttachments') }}
               renderItem={(file: File, index: number) => (
                 <List.Item
                   style={{ padding: '4px 0' }}
                   actions={[
+                    <Button key="preview" type="text" size="small" icon={<EyeOutlined />} onClick={() => openPendingPreview(file)} />,
                     <Button
                       key="delete"
                       type="text"
                       size="small"
                       danger
-                      icon={<DeleteOutlined />}
-                      onClick={() => setPendingFiles((prev) => prev.filter((_, i) => i !== index))}
+                      icon={<CloseCircleOutlined />}
+                      onClick={() => setPendingFiles((prev) => {
+                        const next = new Map(prev);
+                        const existing = next.get(-1) ?? [];
+                        next.set(-1, existing.filter((_, i) => i !== index));
+                        return next;
+                      })}
                     />,
                   ]}
                 >
                   <Space size={8}>
-                    <PaperClipOutlined style={{ fontSize: 16, color: '#8c8c8c' }} />
+                    {file.type.startsWith('image/') ? (
+                      <img
+                        src={URL.createObjectURL(file)}
+                        width={40} height={40}
+                        style={{ objectFit: 'cover', borderRadius: 4, cursor: 'pointer' }}
+                        onClick={() => openPendingPreview(file)}
+                        alt={file.name}
+                      />
+                    ) : (
+                      <FilePdfOutlined style={{ fontSize: 24, color: '#ff4d4f' }} />
+                    )}
                     <div>
                       <Text ellipsis style={{ maxWidth: 200 }}>{file.name}</Text>
                       <br />
@@ -1254,26 +1385,30 @@ export function OrderListPage() {
               </>
             )}
 
-            <div style={{ display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {detailOrder.items.map((item: OrderItemDto) => {
                 const isRemoved = pendingItemRemovals.includes(item.id);
                 const isDraft = detailOrder.status === OrderStatus.Draft;
                 return (
-                  <div key={item.id} style={{ paddingBottom: 12, marginBottom: 12, borderBottom: '1px solid #f0f0f0', ...(isRemoved ? { opacity: 0.4 } : {}) }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <Card
+                    key={item.id}
+                    size="small"
+                    style={{ ...(isRemoved ? { opacity: 0.4 } : {}) }}
+                    title={
                       <Space>
                         <Text strong style={isRemoved ? { textDecoration: 'line-through' } : undefined}>{item.productName}</Text>
                         <Tag>{t('orders.qty', { count: item.quantity })}</Tag>
+                        {(() => { const cat = (categories ?? []).find((c: ProductCategoryDto) => c.id === item.productCategoryId); return cat ? <Tag color="blue">{cat.name}</Tag> : null; })()}
                       </Space>
-                      {isDraft && (
-                        isRemoved ? (
-                          <Button type="text" size="small" icon={<UndoOutlined />} onClick={() => setPendingItemRemovals((prev) => prev.filter((id) => id !== item.id))} />
-                        ) : (
-                          <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => setPendingItemRemovals((prev) => [...prev, item.id])} />
-                        )
-                      )}
-                    </div>
-
+                    }
+                    extra={isDraft && (
+                      isRemoved ? (
+                        <Button type="text" size="small" icon={<UndoOutlined />} onClick={() => setPendingItemRemovals((prev) => prev.filter((id) => id !== item.id))} />
+                      ) : (
+                        <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => setPendingItemRemovals((prev) => [...prev, item.id])} />
+                      )
+                    )}
+                  >
                     <ItemProcessBar item={item} processMap={processMap} tEnum={tEnum} />
 
                     {/* Special Requests */}
@@ -1395,8 +1530,8 @@ export function OrderListPage() {
                         {item.notes}
                       </Text>
                     )}
-                    <OrderAttachments orderId={detailOrder.id} orderItemId={item.id} />
-                  </div>
+                    <OrderAttachments orderId={detailOrder.id} orderItemId={item.id} attachments={item.attachments ?? []} readOnly={!isDraft} ref={(handle) => { if (handle) attachmentRefsMap.current.set(item.id, handle); else attachmentRefsMap.current.delete(item.id); }} />
+                  </Card>
                 );
               })}
 
@@ -1404,19 +1539,23 @@ export function OrderListPage() {
               {pendingItems.map((item, i) => {
                 const cat = (categories ?? []).find((c: ProductCategoryDto) => c.id === item.productCategoryId);
                 return (
-                  <div key={`pending-${i}`} style={{ paddingBottom: 12, marginBottom: 12, borderBottom: '2px dashed #1677ff' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                  <Card
+                    key={`pending-${i}`}
+                    size="small"
+                    style={{ borderStyle: 'dashed', borderColor: '#1677ff' }}
+                    title={
                       <Space>
                         <Text strong>{item.productName}</Text>
                         <Tag>{t('orders.qty', { count: item.quantity })}</Tag>
                         {cat && <Tag color="blue">{cat.name}</Tag>}
                       </Space>
-                      <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => setPendingItems((prev) => prev.filter((_, idx) => idx !== i))} />
-                    </div>
+                    }
+                    extra={<Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => setPendingItems((prev) => prev.filter((_, idx) => idx !== i))} />}
+                  >
                     {item.notes && (
                       <Text type="secondary" style={{ fontSize: 12 }}>{item.notes}</Text>
                     )}
-                  </div>
+                  </Card>
                 );
               })}
             </div>
@@ -1450,12 +1589,32 @@ export function OrderListPage() {
             ) : null}
 
             {/* E) Attachments — inline, same pattern as create mode */}
-            <OrderAttachments orderId={detailOrder.id} />
+            <OrderAttachments orderId={detailOrder.id} attachments={detailOrder.attachments ?? []} readOnly={detailOrder.status !== OrderStatus.Draft} ref={(handle) => { if (handle) attachmentRefsMap.current.set('order', handle); else attachmentRefsMap.current.delete('order'); }} />
           </>
         ) : (
           <Typography.Text>{t('orders.orderNotFound')}</Typography.Text>
         )}
       </Drawer>
+
+      {/* Pending file preview modal */}
+      <Modal
+        open={!!pendingPreview}
+        onCancel={() => {
+          if (pendingPreview) URL.revokeObjectURL(pendingPreview.split('#')[0]);
+          setPendingPreview(null);
+        }}
+        footer={null}
+        width="80vw"
+        style={{ top: 20 }}
+        destroyOnHidden
+      >
+        {pendingPreview && pendingPreviewType === 'image' && (
+          <img src={pendingPreview} style={{ width: '100%', maxHeight: '80vh', objectFit: 'contain' }} alt="Preview" />
+        )}
+        {pendingPreview && pendingPreviewType === 'pdf' && (
+          <iframe src={pendingPreview} style={{ width: '100%', height: '80vh', border: 'none' }} title="PDF Preview" />
+        )}
+      </Modal>
     </div>
   );
 }

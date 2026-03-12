@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@algreen/auth';
-import { processesApi } from '@algreen/api-client';
+import { processesApi, processWorkflowApi } from '@algreen/api-client';
 import { useTranslation } from '@algreen/i18n';
 import { useWorkSessionStore } from '../../stores/work-session-store';
 import { subscribeToPush } from '../../services/push';
@@ -43,6 +43,13 @@ export function TabletLoginPage() {
         processName,
         checkInTime: new Date().toISOString(),
       });
+
+      // Resume paused timers for this station (non-blocking)
+      processWorkflowApi.resumeStation({
+        processId: user.processId,
+        tenantId,
+        userId: user.id,
+      }).catch(() => {});
 
       // Subscribe to push notifications (non-blocking)
       subscribeToPush().then(

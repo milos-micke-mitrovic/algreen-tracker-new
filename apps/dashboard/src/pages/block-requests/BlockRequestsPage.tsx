@@ -101,7 +101,7 @@ export function BlockRequestsPage() {
       render: (s: RequestStatus) => <StatusBadge status={s} />,
     },
     {
-      title: t('common:labels.order'),
+      title: t('common:labels.orderNumber'),
       dataIndex: 'orderNumber',
       width: 140,
       render: (orderNumber: string | null, record: BlockRequestDto) =>
