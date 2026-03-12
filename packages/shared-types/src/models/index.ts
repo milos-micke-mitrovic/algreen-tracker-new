@@ -429,6 +429,7 @@ export interface TabletSubProcessDto {
   totalDurationMinutes: number;
   isWithdrawn: boolean;
   isTimerRunning: boolean;
+  currentLogStartedAt: string | null;
 }
 
 export interface TabletIncomingDto {

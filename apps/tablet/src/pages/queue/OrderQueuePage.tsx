@@ -742,6 +742,23 @@ function SubProcessRow({
   const isActive = subProcess.status === SubProcessStatus.InProgress;
   const isCompleted = subProcess.status === SubProcessStatus.Completed;
   const isWithdrawn = subProcess.isWithdrawn;
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    if (!subProcess.isTimerRunning) return;
+    const interval = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(interval);
+  }, [subProcess.isTimerRunning]);
+
+  const elapsed = useMemo(() => {
+    const prior = subProcess.totalDurationMinutes ?? 0;
+    if (subProcess.isTimerRunning && subProcess.currentLogStartedAt) {
+      const sinceLogStart = Math.floor((Date.now() - new Date(subProcess.currentLogStartedAt).getTime()) / 1000);
+      return prior + Math.max(sinceLogStart, 0);
+    }
+    return prior;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subProcess.totalDurationMinutes, subProcess.currentLogStartedAt, subProcess.isTimerRunning, tick]);
 
   if (isWithdrawn) {
     return (
@@ -771,9 +788,9 @@ function SubProcessRow({
             {tEnum('SubProcessStatus', subProcess.status)}
           </span>
         )}
-        {subProcess.totalDurationMinutes > 0 && (
+        {(elapsed > 0 || isActive) && (
           <span className="text-tablet-xs text-gray-500 ml-2">
-            {formatDuration(subProcess.totalDurationMinutes)}
+            {formatDuration(elapsed)}
           </span>
         )}
       </div>
